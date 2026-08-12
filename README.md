@@ -1,5 +1,17 @@
 # AI API Security Audit Gateway
 
+## Metrics and integration tests
+
+`GET /metrics` exposes Prometheus-format, low-cardinality gateway metrics: request latency/counts, rule decisions, rate-limit rejections, Auditor outcomes/circuit openings, audit queue drops, PostgreSQL batch results, Kafka publish results, and Redis limiter/cache results. Tenant IDs, request IDs, rule IDs, request bodies, tokens, and content hashes are never metric labels.
+
+Run the real PostgreSQL/Redis/Kafka smoke test with Docker Desktop available:
+
+```powershell
+./tests/integration/run-compose.ps1
+```
+
+The normal `go test ./...` command remains Docker-free. Rule create, publish, and rollback requests are emitted through the same best-effort audit pipeline as proxy traffic, with schema version `2`. These events retain only operation metadata, scope, outcome, and a SHA-256 digest of the administrator token.
+
 独立部署在用户与 NewAPI 之间的 OpenAI 兼容安全审计网关。当前已提供可运行的 P0/P1 骨架：请求体限制、规则审计、风险评分、阻断、普通响应代理和 SSE 逐行透传扫描。
 
 ## Quick start

@@ -18,6 +18,7 @@ type ModelResult struct {
 	Categories []string      `json:"categories"`
 	Evidence   string        `json:"evidence"`
 	Model      string        `json:"model"`
+	Version    string        `json:"version,omitempty"`
 	Latency    time.Duration `json:"-"`
 }
 
