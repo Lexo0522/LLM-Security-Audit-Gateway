@@ -14,6 +14,7 @@ type Metrics struct {
 	mu         sync.Mutex
 	counters   map[string]map[string]uint64
 	histograms map[string]map[string]*histogram
+	gauges     map[string]map[string]float64
 }
 type histogram struct {
 	count   uint64
@@ -24,7 +25,19 @@ type histogram struct {
 var latencyBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2, 5}
 
 func NewMetrics() *Metrics {
-	return &Metrics{counters: map[string]map[string]uint64{}, histograms: map[string]map[string]*histogram{}}
+	return &Metrics{counters: map[string]map[string]uint64{}, histograms: map[string]map[string]*histogram{}, gauges: map[string]map[string]float64{}}
+}
+func (m *Metrics) Set(name string, value float64, labels map[string]string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := labelKey(labels)
+	if m.gauges[name] == nil {
+		m.gauges[name] = map[string]float64{}
+	}
+	m.gauges[name][key] = value
 }
 func (m *Metrics) Inc(name string, labels map[string]string) {
 	if m == nil {
@@ -73,6 +86,12 @@ func (m *Metrics) Render() string {
 		lines = append(lines, "# TYPE "+name+" counter")
 		for _, key := range sortedKeys(m.counters[name]) {
 			lines = append(lines, name+key+" "+strconv.FormatUint(m.counters[name][key], 10))
+		}
+	}
+	for _, name := range sortedKeys(m.gauges) {
+		lines = append(lines, "# TYPE "+name+" gauge")
+		for _, key := range sortedKeys(m.gauges[name]) {
+			lines = append(lines, name+key+" "+strconv.FormatFloat(m.gauges[name][key], 'f', -1, 64))
 		}
 	}
 	for _, name := range sortedKeys(m.histograms) {

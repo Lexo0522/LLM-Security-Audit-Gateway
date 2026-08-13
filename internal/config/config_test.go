@@ -33,3 +33,13 @@ func TestLoadSSELimitsDefaultsAndRejectsInvalidValues(t *testing.T) {
 		t.Fatalf("invalid limits accepted=%+v", cfg)
 	}
 }
+
+func TestValidateRejectsProductionDemoBootstrap(t *testing.T) {
+	pepper := "0123456789abcdef0123456789abcdef"
+	if err := (Config{Environment: "production", AllowDemoBootstrap: true, APIKeyPepper: pepper, PostgresURL: "postgres://example"}).Validate(); err == nil {
+		t.Fatal("production demo bootstrap should be rejected")
+	}
+	if err := (Config{Environment: "development", AllowDemoBootstrap: true, APIKeyPepper: pepper, PostgresURL: "postgres://example"}).Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

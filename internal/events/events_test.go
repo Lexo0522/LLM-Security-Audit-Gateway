@@ -3,11 +3,14 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/example/ai-audit-gateway/internal/audit"
 	"github.com/example/ai-audit-gateway/internal/observability"
@@ -16,6 +19,18 @@ import (
 type memorySink struct {
 	mu     sync.Mutex
 	events []audit.Event
+}
+type failingSink struct {
+	calls   int
+	failing atomic.Bool
+}
+
+func (s *failingSink) StoreEvents(context.Context, []audit.Event) error {
+	s.calls++
+	if !s.failing.Load() {
+		return nil
+	}
+	return errors.New("postgres offline")
 }
 
 func TestRedactedEventNeverContainsEvidenceOrCredential(t *testing.T) {
@@ -54,5 +69,26 @@ func TestPipelineWritesV2Metadata(t *testing.T) {
 	}
 	if m.Render() == "" {
 		t.Fatal("missing metrics")
+	}
+}
+func TestPipelineReportsFailureUntilPersistenceSucceeds(t *testing.T) {
+	sink := &failingSink{}
+	sink.failing.Store(true)
+	pipeline := NewPipeline(1, sink, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if !pipeline.Enqueue(audit.Event{EventID: "00000000-0000-0000-0000-000000000001"}) {
+		t.Fatal("first event should enter queue")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if pipeline.Ready() || pipeline.Status().LastError == "" {
+		t.Fatalf("status=%+v", pipeline.Status())
+	}
+	if pipeline.Enqueue(audit.Event{EventID: "00000000-0000-0000-0000-000000000002"}) {
+		t.Fatal("full durable queue should reject second event")
+	}
+	sink.failing.Store(false)
+	time.Sleep(1100 * time.Millisecond)
+	pipeline.Close()
+	if !pipeline.Ready() {
+		t.Fatalf("recovered status=%+v", pipeline.Status())
 	}
 }

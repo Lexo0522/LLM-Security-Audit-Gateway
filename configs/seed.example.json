@@ -1,0 +1,33 @@
+{
+  "rules": [
+    {
+      "id": "credential-pattern",
+      "name": "credential pattern",
+      "pattern": "sk-[a-z0-9]+",
+      "severity": "high",
+      "action": "block",
+      "weight": 85,
+      "regex": true
+    }
+  ],
+  "policies": [
+    {
+      "scope": "global",
+      "route_path": "*",
+      "direction": "request",
+      "monitor_at": 30,
+      "intervention_at": 80,
+      "intervention_action": "block",
+      "auditor_failure_mode": "fail_open"
+    },
+    {
+      "scope": "global",
+      "route_path": "*",
+      "direction": "response",
+      "monitor_at": 30,
+      "intervention_at": 80,
+      "intervention_action": "block",
+      "auditor_failure_mode": "fail_open"
+    }
+  ]
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/example/ai-audit-gateway/internal/audit"
@@ -24,11 +25,23 @@ type RuleSet struct {
 	Version   string            `json:"version"`
 	Scope     string            `json:"scope"`
 	Status    string            `json:"status"`
+	Source    string            `json:"source"`
 	Rules     []rule.Definition `json:"rules"`
 	CreatedAt time.Time         `json:"created_at"`
 }
 
-type Repository struct{ pool *pgxpool.Pool }
+type OutboxRecord struct {
+	EventID   string
+	TenantID  string
+	Payload   []byte
+	Attempts  int
+	CreatedAt time.Time
+}
+
+type Repository struct {
+	pool          *pgxpool.Pool
+	outboxEnabled atomic.Bool
+}
 
 func Open(ctx context.Context, url string) (*Repository, error) {
 	if url == "" {
@@ -47,6 +60,11 @@ func Open(ctx context.Context, url string) (*Repository, error) {
 func (r *Repository) Close() {
 	if r != nil && r.pool != nil {
 		r.pool.Close()
+	}
+}
+func (r *Repository) EnableOutbox(enabled bool) {
+	if r != nil {
+		r.outboxEnabled.Store(enabled)
 	}
 }
 func (r *Repository) Migrate(ctx context.Context) error {
@@ -68,12 +86,57 @@ func (r *Repository) Migrate(ctx context.Context) error {
 	}
 	return nil
 }
+func (r *Repository) Ping(ctx context.Context) error {
+	if r == nil || r.pool == nil {
+		return fmt.Errorf("postgres disabled")
+	}
+	return r.pool.Ping(ctx)
+}
+
+// Ready verifies the authority boundaries used on the gateway request path.
+func (r *Repository) Ready(ctx context.Context) error {
+	if err := r.Ping(ctx); err != nil {
+		return err
+	}
+	var one int
+	if err := r.pool.QueryRow(ctx, `SELECT 1 FROM gateway_api_keys LIMIT 1`).Scan(&one); err != nil && err != pgx.ErrNoRows {
+		return fmt.Errorf("identity store: %w", err)
+	}
+	if err := r.pool.QueryRow(ctx, `SELECT 1 FROM rule_sets LIMIT 1`).Scan(&one); err != nil && err != pgx.ErrNoRows {
+		return fmt.Errorf("rule store: %w", err)
+	}
+	if err := r.pool.QueryRow(ctx, `SELECT 1 FROM policies LIMIT 1`).Scan(&one); err != nil && err != pgx.ErrNoRows {
+		return fmt.Errorf("policy store: %w", err)
+	}
+	var canInsert bool
+	if err := r.pool.QueryRow(ctx, `SELECT has_table_privilege(current_user, 'audit_records', 'INSERT')`).Scan(&canInsert); err != nil || !canInsert {
+		if err != nil {
+			return fmt.Errorf("audit store: %w", err)
+		}
+		return fmt.Errorf("audit store: INSERT privilege missing")
+	}
+	if r.outboxEnabled.Load() {
+		if err := r.pool.QueryRow(ctx, `SELECT has_table_privilege(current_user, 'audit_outbox', 'INSERT,UPDATE,SELECT')`).Scan(&canInsert); err != nil || !canInsert {
+			if err != nil {
+				return fmt.Errorf("audit outbox: %w", err)
+			}
+			return fmt.Errorf("audit outbox: required privileges missing")
+		}
+	}
+	return nil
+}
 func (r *Repository) CreateRuleSet(ctx context.Context, scope string, definitions []rule.Definition) (RuleSet, error) {
+	return r.CreateRuleSetWithSource(ctx, scope, definitions, "managed")
+}
+func (r *Repository) CreateRuleSetWithSource(ctx context.Context, scope string, definitions []rule.Definition, source string) (RuleSet, error) {
 	if r == nil {
 		return RuleSet{}, fmt.Errorf("postgres disabled")
 	}
 	if scope == "" {
 		scope = "global"
+	}
+	if source != "managed" && source != "demo" {
+		return RuleSet{}, fmt.Errorf("rule set source must be managed or demo")
 	}
 	if err := validate(scope, definitions); err != nil {
 		return RuleSet{}, err
@@ -83,7 +146,7 @@ func (r *Repository) CreateRuleSet(ctx context.Context, scope string, definition
 	if err != nil {
 		return RuleSet{}, err
 	}
-	_, err = r.pool.Exec(ctx, `INSERT INTO rule_sets(version, scope, status, rules) VALUES($1,$2,'draft',$3)`, version, scope, raw)
+	_, err = r.pool.Exec(ctx, `INSERT INTO rule_sets(version, scope, status, source, rules) VALUES($1,$2,'draft',$3,$4)`, version, scope, source, raw)
 	if err != nil {
 		return RuleSet{}, err
 	}
@@ -92,14 +155,14 @@ func (r *Repository) CreateRuleSet(ctx context.Context, scope string, definition
 func (r *Repository) GetRuleSet(ctx context.Context, version string) (RuleSet, error) {
 	var set RuleSet
 	var raw []byte
-	err := r.pool.QueryRow(ctx, `SELECT version,scope,status,rules,created_at FROM rule_sets WHERE version=$1`, version).Scan(&set.Version, &set.Scope, &set.Status, &raw, &set.CreatedAt)
+	err := r.pool.QueryRow(ctx, `SELECT version,scope,status,source,rules,created_at FROM rule_sets WHERE version=$1`, version).Scan(&set.Version, &set.Scope, &set.Status, &set.Source, &raw, &set.CreatedAt)
 	if err == nil {
 		err = json.Unmarshal(raw, &set.Rules)
 	}
 	return set, err
 }
 func (r *Repository) ListRuleSets(ctx context.Context) ([]RuleSet, error) {
-	rows, err := r.pool.Query(ctx, `SELECT version,scope,status,rules,created_at FROM rule_sets ORDER BY created_at DESC`)
+	rows, err := r.pool.Query(ctx, `SELECT version,scope,status,source,rules,created_at FROM rule_sets ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +171,7 @@ func (r *Repository) ListRuleSets(ctx context.Context) ([]RuleSet, error) {
 	for rows.Next() {
 		var s RuleSet
 		var raw []byte
-		if err = rows.Scan(&s.Version, &s.Scope, &s.Status, &raw, &s.CreatedAt); err != nil {
+		if err = rows.Scan(&s.Version, &s.Scope, &s.Status, &s.Source, &raw, &s.CreatedAt); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal(raw, &s.Rules); err != nil {
@@ -160,8 +223,23 @@ func (r *Repository) Active(ctx context.Context, scope string) (RuleSet, error) 
 	}
 	return r.GetRuleSet(ctx, version)
 }
+func (r *Repository) ActiveManaged(ctx context.Context, scope string) (RuleSet, error) {
+	var version string
+	err := r.pool.QueryRow(ctx, `SELECT version FROM rule_sets WHERE scope=$1 AND status='published' AND source='managed' ORDER BY published_at DESC LIMIT 1`, scope).Scan(&version)
+	if err != nil {
+		return RuleSet{}, err
+	}
+	return r.GetRuleSet(ctx, version)
+}
 func (r *Repository) ActiveDefinitions(ctx context.Context, scope string) ([]rule.Definition, string, error) {
 	set, err := r.Active(ctx, scope)
+	if err != nil {
+		return nil, "", err
+	}
+	return set.Rules, set.Version, nil
+}
+func (r *Repository) ActiveManagedDefinitions(ctx context.Context, scope string) ([]rule.Definition, string, error) {
+	set, err := r.ActiveManaged(ctx, scope)
 	if err != nil {
 		return nil, "", err
 	}
@@ -175,11 +253,71 @@ func (r *Repository) EnsureBootstrap(ctx context.Context, definitions []rule.Def
 	if err == nil {
 		return set, nil
 	}
-	set, err = r.CreateRuleSet(ctx, "global", definitions)
+	set, err = r.CreateRuleSetWithSource(ctx, "global", definitions, "demo")
 	if err != nil {
 		return RuleSet{}, err
 	}
 	return r.Publish(ctx, set.Version)
+}
+func (r *Repository) HasManagedConfiguration(ctx context.Context) (bool, error) {
+	if r == nil {
+		return false, fmt.Errorf("postgres disabled")
+	}
+	var exists bool
+	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM rule_sets WHERE scope='global' AND status='published' AND source='managed') AND EXISTS(SELECT 1 FROM policies WHERE scope='global' AND direction='request') AND EXISTS(SELECT 1 FROM policies WHERE scope='global' AND direction='response')`).Scan(&exists)
+	return exists, err
+}
+
+// SeedManagedConfiguration makes the first production configuration durable as
+// one transaction. Existing managed configuration is never overwritten.
+func (r *Repository) SeedManagedConfiguration(ctx context.Context, definitions []rule.Definition, policies []policy.Policy) error {
+	if r == nil {
+		return fmt.Errorf("postgres disabled")
+	}
+	if err := validate("global", definitions); err != nil {
+		return err
+	}
+	if len(policies) != 2 {
+		return fmt.Errorf("seed requires exactly global request and response policies")
+	}
+	seen := map[string]bool{}
+	for _, value := range policies {
+		value = value.Normalized()
+		if value.Scope != "global" || value.RoutePath != "*" || (value.Direction != "request" && value.Direction != "response") || seen[value.Direction] {
+			return fmt.Errorf("seed policies must be one global wildcard request and response policy")
+		}
+		if err := policy.Validate(value); err != nil {
+			return err
+		}
+		seen[value.Direction] = true
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM rule_sets WHERE scope='global' AND status='published' AND source='managed') OR EXISTS(SELECT 1 FROM policies WHERE scope='global')`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("managed configuration already exists")
+	}
+	raw, err := json.Marshal(definitions)
+	if err != nil {
+		return err
+	}
+	version := uuid.NewString()
+	if _, err = tx.Exec(ctx, `INSERT INTO rule_sets(version,scope,status,source,rules,published_at) VALUES($1,'global','published','managed',$2,now())`, version, raw); err != nil {
+		return err
+	}
+	for _, value := range policies {
+		value = value.Normalized()
+		if _, err = tx.Exec(ctx, `INSERT INTO policies(id,scope,route_path,direction,monitor_at,intervention_at,intervention_action,auditor_failure_mode,revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,1)`, uuid.NewString(), value.Scope, value.RoutePath, value.Direction, value.MonitorAt, value.InterventionAt, value.InterventionAction, value.AuditorFailureMode); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 func (r *Repository) CreateGatewayAPIKey(ctx context.Context, record auth.KeyRecord) (auth.KeyRecord, error) {
 	if r == nil {
@@ -306,7 +444,11 @@ func (r *Repository) StoreEvents(ctx context.Context, events []audit.Event) erro
 	if r == nil || len(events) == 0 {
 		return nil
 	}
-	batch := &pgx.Batch{}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
 	for _, e := range events {
 		e = audit.RedactEvidence(e)
 		matches, _ := json.Marshal(e.Matches)
@@ -315,16 +457,75 @@ func (r *Repository) StoreEvents(ctx context.Context, events []audit.Event) erro
 		if e.Auditor != nil {
 			auditor, _ = json.Marshal(e.Auditor)
 		}
-		batch.Queue(`INSERT INTO audit_records(id,event_id,request_id,tenant_id,direction,path,model,risk_score,decision,rule_version,matches,auditor,auditor_error,latency_ms,body_bytes,content_sha256,metadata,api_key_id,policy_id,policy_revision,created_at) VALUES($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT (event_id) DO NOTHING`, e.EventID, e.RequestID, e.TenantID, e.Direction, e.Path, e.Model, e.RiskScore, e.Decision, e.RuleVersion, matches, auditor, e.AuditorError, e.LatencyMS, e.BodyBytes, e.ContentSHA256, metadata, nullableUUID(e.APIKeyID), nullableUUID(e.PolicyID), nullableRevision(e.PolicyRevision), e.EventTime)
-	}
-	br := r.pool.SendBatch(ctx, batch)
-	defer br.Close()
-	for range events {
-		if _, err := br.Exec(); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO audit_records(id,event_id,request_id,tenant_id,direction,path,model,risk_score,decision,rule_version,matches,auditor,auditor_error,latency_ms,body_bytes,content_sha256,metadata,api_key_id,policy_id,policy_revision,created_at) VALUES($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT (event_id) DO NOTHING`, e.EventID, e.RequestID, e.TenantID, e.Direction, e.Path, e.Model, e.RiskScore, e.Decision, e.RuleVersion, matches, auditor, e.AuditorError, e.LatencyMS, e.BodyBytes, e.ContentSHA256, metadata, nullableUUID(e.APIKeyID), nullableUUID(e.PolicyID), nullableRevision(e.PolicyRevision), e.EventTime); err != nil {
 			return err
 		}
+		if r.outboxEnabled.Load() {
+			payload, _ := json.Marshal(e)
+			if _, err := tx.Exec(ctx, `INSERT INTO audit_outbox(event_id,tenant_id,payload) VALUES($1,$2,$3) ON CONFLICT(event_id) DO NOTHING`, e.EventID, e.TenantID, payload); err != nil {
+				return err
+			}
+		}
 	}
-	return nil
+	return tx.Commit(ctx)
+}
+func (r *Repository) ClaimOutbox(ctx context.Context, limit int, lease time.Duration) ([]OutboxRecord, error) {
+	if r == nil {
+		return nil, fmt.Errorf("postgres disabled")
+	}
+	if limit < 1 {
+		limit = 100
+	}
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	rows, err := r.pool.Query(ctx, `WITH candidate AS (SELECT event_id FROM audit_outbox WHERE published_at IS NULL AND available_at <= now() AND (lease_until IS NULL OR lease_until < now()) ORDER BY created_at LIMIT $1 FOR UPDATE SKIP LOCKED) UPDATE audit_outbox o SET lease_until=now()+$2::interval, attempts=o.attempts+1 FROM candidate WHERE o.event_id=candidate.event_id RETURNING o.event_id,o.tenant_id,o.payload,o.attempts,o.created_at`, limit, lease.String())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []OutboxRecord{}
+	for rows.Next() {
+		var record OutboxRecord
+		if err := rows.Scan(&record.EventID, &record.TenantID, &record.Payload, &record.Attempts, &record.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, record)
+	}
+	return result, rows.Err()
+}
+func (r *Repository) MarkOutboxPublished(ctx context.Context, eventID string) error {
+	_, err := r.pool.Exec(ctx, `UPDATE audit_outbox SET published_at=now(), lease_until=NULL,last_error=NULL WHERE event_id=$1`, eventID)
+	return err
+}
+func (r *Repository) RetryOutbox(ctx context.Context, eventID string, attempts int, cause error) error {
+	delay := time.Second * time.Duration(1<<min(attempts-1, 8))
+	if delay > 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	_, err := r.pool.Exec(ctx, `UPDATE audit_outbox SET lease_until=NULL,available_at=now()+$2::interval,last_error=$3 WHERE event_id=$1`, eventID, delay.String(), truncateError(cause))
+	return err
+}
+func (r *Repository) OutboxPending(ctx context.Context) (int64, error) {
+	var count int64
+	err := r.pool.QueryRow(ctx, `SELECT count(*) FROM audit_outbox WHERE published_at IS NULL`).Scan(&count)
+	return count, err
+}
+func truncateError(err error) string {
+	if err == nil {
+		return ""
+	}
+	value := err.Error()
+	if len(value) > 512 {
+		return value[:512]
+	}
+	return value
+}
+func min(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 func nullableUUID(value string) any {
 	if value == "" {

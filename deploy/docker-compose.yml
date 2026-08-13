@@ -6,6 +6,10 @@ services:
     ports:
       - "8080:8080"
     environment:
+      # Compose is a local development stack. Production must seed managed
+      # rules and policies before the gateway starts.
+      GATEWAY_ENV: "development"
+      ALLOW_DEMO_BOOTSTRAP_RULES: "true"
       GATEWAY_LISTEN_ADDR: ":8080"
       NEWAPI_BASE_URL: "${NEWAPI_BASE_URL:-http://newapi:3000}"
       NEWAPI_API_KEY: "${NEWAPI_API_KEY:-}"

@@ -34,3 +34,21 @@ func TestReplaceKeepsPreviousSnapshotOnCompileError(t *testing.T) {
 		t.Fatalf("snapshot was replaced after error: %#v", result)
 	}
 }
+
+func TestRegistryReadinessRequiresManagedFreshSnapshot(t *testing.T) {
+	registry, err := NewRegistry(nil, []Definition{{ID: "safe", Pattern: "safe"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registry.Ready() {
+		t.Fatal("demo bootstrap must not be ready")
+	}
+	registry.SetGlobalSource("managed")
+	if !registry.Ready() {
+		t.Fatal("managed snapshot should be ready")
+	}
+	registry.MarkStale()
+	if registry.Ready() {
+		t.Fatal("stale snapshot must not be ready")
+	}
+}

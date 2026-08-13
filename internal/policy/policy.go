@@ -2,6 +2,8 @@ package policy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -105,7 +107,15 @@ type Resolver struct {
 	source  Source
 	current atomic.Pointer[snapshot]
 }
-type snapshot struct{ policies []Policy }
+type snapshot struct {
+	policies []Policy
+	stale    bool
+}
+type Status struct {
+	Hash  string `json:"hash"`
+	Stale bool   `json:"stale"`
+	Count int    `json:"count"`
+}
 
 func NewResolver(source Source) *Resolver {
 	r := &Resolver{source: source}
@@ -130,8 +140,24 @@ func (r *Resolver) Refresh(ctx context.Context) error {
 		}
 		compiled[i] = p.Normalized()
 	}
-	r.current.Store(&snapshot{policies: compiled})
+	r.current.Store(&snapshot{policies: compiled, stale: false})
 	return nil
+}
+func (r *Resolver) MarkStale() {
+	current := r.current.Load()
+	if current == nil {
+		return
+	}
+	r.current.Store(&snapshot{policies: current.policies, stale: true})
+}
+func (r *Resolver) Status() Status {
+	current := r.current.Load()
+	if current == nil {
+		return Status{Stale: true}
+	}
+	value := fmt.Sprintf("%#v", current.policies)
+	sum := sha256.Sum256([]byte(value))
+	return Status{Hash: hex.EncodeToString(sum[:]), Count: len(current.policies), Stale: current.stale}
 }
 func (r *Resolver) Resolve(tenant, route, direction string) Policy {
 	current := r.current.Load()

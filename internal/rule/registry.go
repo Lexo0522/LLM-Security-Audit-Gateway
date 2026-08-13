@@ -13,8 +13,15 @@ type Registry struct {
 	mu            sync.RWMutex
 	global        *Engine
 	globalVersion string
+	globalSource  string
+	globalStale   bool
 	tenants       map[string]*tenantSnapshot
 	resolved      map[string]struct{}
+}
+type Status struct {
+	Version string `json:"version"`
+	Source  string `json:"source"`
+	Stale   bool   `json:"stale"`
 }
 type RuleLoader interface {
 	ActiveDefinitions(context.Context, string) ([]Definition, string, error)
@@ -29,9 +36,24 @@ func NewRegistry(repo RuleLoader, bootstrap []Definition) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Registry{repo: repo, global: e, globalVersion: "bootstrap", tenants: map[string]*tenantSnapshot{}, resolved: map[string]struct{}{}}, nil
+	return &Registry{repo: repo, global: e, globalVersion: "bootstrap", globalSource: "demo", tenants: map[string]*tenantSnapshot{}, resolved: map[string]struct{}{}}, nil
 }
-func (r *Registry) Ready() bool { r.mu.RLock(); defer r.mu.RUnlock(); return r.global != nil }
+func (r *Registry) Ready() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.global != nil && r.globalSource == "managed" && !r.globalStale
+}
+func (r *Registry) Status() Status {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return Status{Version: r.globalVersion, Source: r.globalSource, Stale: r.globalStale}
+}
+func (r *Registry) MarkStale() { r.mu.Lock(); defer r.mu.Unlock(); r.globalStale = true }
+func (r *Registry) SetGlobalSource(source string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.globalSource = source
+}
 func (r *Registry) Audit(ctx context.Context, tenant string, input audit.Input) (audit.Result, string) {
 	r.EnsureTenant(ctx, tenant)
 	r.mu.RLock()
@@ -85,7 +107,7 @@ func (r *Registry) Refresh(ctx context.Context, scope string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if scope == "global" {
-		r.global, r.globalVersion = engine, version
+		r.global, r.globalVersion, r.globalSource, r.globalStale = engine, version, "managed", false
 	} else {
 		tenant := scope[len("tenant:"):]
 		r.tenants[tenant] = &tenantSnapshot{engine, version}

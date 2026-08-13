@@ -1,0 +1,33 @@
+groups:
+  - name: ai-audit-gateway
+    rules:
+      - alert: AuditGatewayNotReady
+        expr: audit_ready == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations: { summary: "AI audit gateway is not ready" }
+      - alert: AuditPostgresUnavailable
+        expr: audit_dependency_healthy{component="postgres"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations: { summary: "Gateway PostgreSQL authority is unavailable" }
+      - alert: AuditQueueNearCapacity
+        expr: audit_event_queue_pending / audit_event_queue_capacity > 0.8
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Audit persistence queue exceeds 80% capacity" }
+      - alert: AuditOutboxBacklog
+        expr: audit_outbox_pending > 1000
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "Kafka audit outbox backlog is growing" }
+      - alert: AuditRedisLocalFallback
+        expr: audit_redis_limiter_degraded == 1
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Gateway is using local Redis rate-limit fallback" }
+      - alert: AuditAuditorUnavailable
+        expr: audit_dependency_healthy{component="auditor"} == 0
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Configured model auditor is unavailable" }

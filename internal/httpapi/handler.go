@@ -14,6 +14,7 @@ import (
 	"github.com/example/ai-audit-gateway/internal/auth"
 	"github.com/example/ai-audit-gateway/internal/config"
 	"github.com/example/ai-audit-gateway/internal/events"
+	"github.com/example/ai-audit-gateway/internal/health"
 	"github.com/example/ai-audit-gateway/internal/normalize"
 	"github.com/example/ai-audit-gateway/internal/observability"
 	"github.com/example/ai-audit-gateway/internal/policy"
@@ -35,7 +36,10 @@ type Handler struct {
 	auditor    audit.Auditor
 	events     *events.Pipeline
 	metrics    *observability.Metrics
+	readiness  *health.Manager
 }
+
+func (h *Handler) SetReadiness(readiness *health.Manager) { h.readiness = readiness }
 
 func New(cfg config.Config, rules *rule.Registry, policies *policy.Resolver, identities auth.Authenticator, limiter ratelimit.Limiter, auditor audit.Auditor, pipeline *events.Pipeline, metrics ...*observability.Metrics) *Handler {
 	if limiter == nil {
@@ -64,6 +68,13 @@ func (h *Handler) Register(app *fiber.App) {
 		return c.SendString(h.metrics.Render())
 	})
 	app.Get("/readyz", func(c *fiber.Ctx) error {
+		if h.readiness != nil {
+			report := h.readiness.Report()
+			if report.Status != "ready" {
+				return c.Status(fiber.StatusServiceUnavailable).JSON(report)
+			}
+			return c.JSON(report)
+		}
 		if h.rules == nil || !h.rules.Ready() {
 			return c.Status(503).JSON(fiber.Map{"status": "not_ready"})
 		}

@@ -12,6 +12,12 @@ Run the real PostgreSQL/Redis/Kafka smoke test with Docker Desktop available:
 
 The normal `go test ./...` command remains Docker-free. Rule create, publish, and rollback requests are emitted through the same best-effort audit pipeline as proxy traffic, with schema version `2`. These events retain only operation metadata, scope, outcome, and a SHA-256 digest of the administrator token.
 
+## Production readiness and managed bootstrap
+
+`/healthz` reports process liveness. `/readyz` reports PostgreSQL identity/audit capability, managed rules and policies, audit queue status, Redis, Kafka/outbox, and the optional model auditor. PostgreSQL, managed snapshots, and audit persistence are required; Redis, Kafka, and the auditor are observable degraded dependencies. Kafka delivery uses a PostgreSQL transactional outbox and replays at least once after recovery.
+
+Production does not run example rules. Run `go run ./cmd/seed -file ./configs/seed.example.json` before the first gateway start, supplying deployment-owned rules instead of the example. `ALLOW_DEMO_BOOTSTRAP_RULES=true` is allowed only for `GATEWAY_ENV=development` or `test`.
+
 ## SSE incremental auditing and safe termination
 
 Streaming Chat Completions, Legacy Completions, and Responses API responses are parsed as SSE events before forwarding. The gateway audits Chat `choices[].delta.content`, `choices[].delta.tool_calls[].function.arguments`, `choices[].delta.function_call.arguments`, and Legacy `choices[].text`. For `/v1/responses`, it audits `response.output_text.delta`, `response.function_call_arguments.delta`, `response.refusal.delta`, `response.reasoning_text.delta`, and `response.reasoning_summary_text.delta` events through their non-empty JSON `delta` fields. Comments, non-JSON data, unknown event types/JSON fields, and `[DONE]` remain wire-compatible pass-through events.
@@ -40,13 +46,13 @@ With `ADMIN_API_TOKEN` configured on the admin listener, use `POST /admin/v1/api
 
 ```bash
 go mod tidy
-go run ./cmd/gateway
+GATEWAY_ENV=development ALLOW_DEMO_BOOTSTRAP_RULES=true go run ./cmd/gateway
 ```
 
-设置 `NEWAPI_BASE_URL` 指向 NewAPI，例如：
+生产环境先用受控规则文件执行 `go run ./cmd/seed -file ./configs/seed.example.json`，再以默认 `GATEWAY_ENV=production` 启动网关。开发环境可设置 `NEWAPI_BASE_URL` 指向 NewAPI，例如：
 
 ```bash
-NEWAPI_BASE_URL=http://localhost:3000 go run ./cmd/gateway
+GATEWAY_ENV=development ALLOW_DEMO_BOOTSTRAP_RULES=true NEWAPI_BASE_URL=http://localhost:3000 go run ./cmd/gateway
 ```
 
 网关监听 `:8080`：

@@ -50,3 +50,17 @@ func TestResolverPrecedence(t *testing.T) {
 		t.Fatalf("responses policy got %q", got.ID)
 	}
 }
+
+func TestResolverStatusMarksFailedRefreshStale(t *testing.T) {
+	resolver := NewResolver(policySource{policies: []Policy{{Scope: "global", RoutePath: "*", Direction: "request", MonitorAt: 30, InterventionAt: 80, InterventionAction: Block, AuditorFailureMode: "fail_open"}}})
+	if err := resolver.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if status := resolver.Status(); status.Hash == "" || status.Stale {
+		t.Fatalf("status=%+v", status)
+	}
+	resolver.MarkStale()
+	if !resolver.Status().Stale {
+		t.Fatal("stale status was not retained")
+	}
+}
