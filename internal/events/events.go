@@ -32,6 +32,7 @@ func (p *KafkaPublisher) Publish(ctx context.Context, event audit.Event) error {
 	if p == nil {
 		return nil
 	}
+	event = audit.RedactEvidence(event)
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -69,6 +70,7 @@ func NewPipeline(size int, sink Sink, publisher Publisher, logger *slog.Logger, 
 	return p
 }
 func (p *Pipeline) Enqueue(event audit.Event) bool {
+	event = audit.RedactEvidence(event)
 	select {
 	case p.ch <- event:
 		p.metrics.Inc("audit_events_enqueued_total", nil)

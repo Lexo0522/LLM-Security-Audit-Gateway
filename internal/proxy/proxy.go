@@ -14,6 +14,12 @@ import (
 	"github.com/example/ai-audit-gateway/internal/stream"
 )
 
+// InspectionBlockedError reports whether a streaming response may already have
+// reached the client when a response-side policy blocks subsequent content.
+type InspectionBlockedError struct{ ResponseStarted bool }
+
+func (e *InspectionBlockedError) Error() string { return "upstream response blocked by audit policy" }
+
 type Client struct {
 	cfg  config.Config
 	http *http.Client
@@ -41,9 +47,15 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, heade
 		return err
 	}
 	defer resp.Body.Close()
-	onHeaders(resp.StatusCode, resp.Header)
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		return stream.Copy(ctx, dst, resp.Body, inspect)
+		onHeaders(resp.StatusCode, resp.Header)
+		if err := stream.Copy(ctx, dst, resp.Body, inspect); err != nil {
+			if err == io.ErrClosedPipe {
+				return &InspectionBlockedError{ResponseStarted: true}
+			}
+			return err
+		}
+		return nil
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(c.cfg.MaxResponseBytes)+1))
 	if err != nil {
@@ -53,8 +65,9 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, heade
 		return fmt.Errorf("upstream response exceeds limit")
 	}
 	if !inspect(data) {
-		return io.ErrClosedPipe
+		return &InspectionBlockedError{}
 	}
+	onHeaders(resp.StatusCode, resp.Header)
 	_, err = dst.Write(data)
 	return err
 }
@@ -62,7 +75,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, heade
 func copyHeaders(dst, src http.Header) {
 	for key, values := range src {
 		lower := strings.ToLower(key)
-		if lower == "host" || lower == "content-length" || lower == "authorization" {
+		if lower == "host" || lower == "content-length" || lower == "authorization" || lower == "x-tenant-id" {
 			continue
 		}
 		for _, value := range values {

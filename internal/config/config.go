@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ type Config struct {
 	AuditorTimeoutMS   int
 	AuditorConcurrency int
 	EventQueueSize     int
+	APIKeyPepper       string
 }
 
 func Load() Config {
@@ -53,7 +55,18 @@ func Load() Config {
 		AuditorTimeoutMS:   envInt("AUDITOR_TIMEOUT_MS", 350),
 		AuditorConcurrency: envInt("AUDITOR_CONCURRENCY", 8),
 		EventQueueSize:     envInt("AUDIT_EVENT_QUEUE_SIZE", 1000),
+		APIKeyPepper:       os.Getenv("GATEWAY_API_KEY_PEPPER"),
 	}
+}
+
+func (c Config) Validate() error {
+	if len(c.APIKeyPepper) < 32 {
+		return fmt.Errorf("GATEWAY_API_KEY_PEPPER must be at least 32 bytes")
+	}
+	if c.PostgresURL == "" {
+		return fmt.Errorf("POSTGRES_URL is required for gateway API key authentication")
+	}
+	return nil
 }
 
 func envList(key string) []string {

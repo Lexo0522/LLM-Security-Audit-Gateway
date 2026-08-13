@@ -2,8 +2,10 @@ package events
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -14,6 +16,23 @@ import (
 type memorySink struct {
 	mu     sync.Mutex
 	events []audit.Event
+}
+
+func TestRedactedEventNeverContainsEvidenceOrCredential(t *testing.T) {
+	sink := &memorySink{}
+	pipeline := NewPipeline(1, sink, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	pipeline.Enqueue(audit.Event{SchemaVersion: "2", TenantID: "tenant-a", Decision: "redact", Matches: []audit.Match{{Evidence: "secret-value"}}, Auditor: &audit.ModelResult{Evidence: "agw.super-secret"}})
+	pipeline.Close()
+	sink.mu.Lock()
+	event := sink.events[0]
+	sink.mu.Unlock()
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "secret-value") || strings.Contains(string(payload), "agw.") || event.Metadata["evidence_redacted"] != "true" {
+		t.Fatalf("redacted event leaked material: %s", payload)
+	}
 }
 
 func (s *memorySink) StoreEvents(_ context.Context, events []audit.Event) error {

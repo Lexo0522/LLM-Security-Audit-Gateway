@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/example/ai-audit-gateway/internal/audit"
+	"github.com/example/ai-audit-gateway/internal/auth"
 	"github.com/example/ai-audit-gateway/internal/config"
 	"github.com/example/ai-audit-gateway/internal/events"
 	"github.com/example/ai-audit-gateway/internal/httpapi"
 	"github.com/example/ai-audit-gateway/internal/observability"
+	"github.com/example/ai-audit-gateway/internal/policy"
 	"github.com/example/ai-audit-gateway/internal/ratelimit"
 	"github.com/example/ai-audit-gateway/internal/rule"
 	"github.com/example/ai-audit-gateway/internal/storage"
@@ -25,30 +27,56 @@ var bootstrapRules = []rule.Definition{
 func main() {
 	cfg := config.Load()
 	logger := observability.Logger()
+	if err := cfg.Validate(); err != nil {
+		logger.Error("invalid gateway configuration", slog.Any("error", err))
+		return
+	}
 	ctx := context.Background()
 	metrics := observability.NewMetrics()
 	repo, err := storage.Open(ctx, cfg.PostgresURL)
-	if err != nil {
-		logger.Warn("postgres unavailable; persistence and rule management disabled", slog.Any("error", err))
-		repo = nil
+	if err != nil || repo == nil {
+		logger.Error("postgres is required for gateway identity", slog.Any("error", err))
+		return
 	}
-	if repo != nil {
-		if err = repo.Migrate(ctx); err != nil {
-			logger.Error("postgres migration failed", slog.Any("error", err))
-			return
-		}
-		if _, err = repo.EnsureBootstrap(ctx, bootstrapRules); err != nil {
-			logger.Error("bootstrap rule setup failed", slog.Any("error", err))
-			return
-		}
-		defer repo.Close()
+	if err = repo.Migrate(ctx); err != nil {
+		logger.Error("postgres migration failed", slog.Any("error", err))
+		return
+	}
+	if _, err = repo.EnsureBootstrap(ctx, bootstrapRules); err != nil {
+		logger.Error("bootstrap rule setup failed", slog.Any("error", err))
+		return
+	}
+	if err = repo.EnsurePolicies(ctx); err != nil {
+		logger.Error("bootstrap policies", slog.Any("error", err))
+		return
+	}
+	defer repo.Close()
+	keys, err := auth.NewManager(repo, cfg.APIKeyPepper)
+	if err != nil {
+		logger.Error("create API key manager", slog.Any("error", err))
+		return
+	}
+	policies := policy.NewResolver(repo)
+	if err = policies.Refresh(ctx); err != nil {
+		logger.Error("load policies", slog.Any("error", err))
+		return
+	}
+	policyNotifier, err := policy.NewNotifier(cfg.RedisURL)
+	if err != nil {
+		logger.Warn("redis policy notifications unavailable", slog.Any("error", err))
+	}
+	if policyNotifier != nil {
+		defer policyNotifier.Close()
+		policyNotifier.Subscribe(context.Background(), func() {
+			if refreshErr := policies.Refresh(context.Background()); refreshErr != nil {
+				logger.Warn("policy refresh failed", slog.Any("error", refreshErr))
+			}
+		})
 	}
 	var cachedRules *rule.CacheLoader
-	if repo != nil {
-		cachedRules, err = rule.NewCacheLoader(repo, cfg.RedisURL, metrics)
-		if err != nil {
-			logger.Warn("redis rule cache unavailable", slog.Any("error", err))
-		}
+	cachedRules, err = rule.NewCacheLoader(repo, cfg.RedisURL, metrics)
+	if err != nil {
+		logger.Warn("redis rule cache unavailable", slog.Any("error", err))
 	}
 	loader := rule.RuleLoader(repo)
 	if cachedRules != nil {
@@ -60,10 +88,8 @@ func main() {
 		logger.Error("compile bootstrap rules", slog.Any("error", err))
 		return
 	}
-	if repo != nil {
-		if err = registry.Refresh(ctx, "global"); err != nil {
-			logger.Warn("using bootstrap rules", slog.Any("error", err))
-		}
+	if err = registry.Refresh(ctx, "global"); err != nil {
+		logger.Warn("using bootstrap rules", slog.Any("error", err))
 	}
 	if cachedRules != nil {
 		cachedRules.Subscribe(context.Background(), func(scope string) {
@@ -87,10 +113,14 @@ func main() {
 	pipeline := events.NewPipeline(cfg.EventQueueSize, repo, events.NewKafka(cfg.KafkaBrokers, cfg.KafkaAuditTopic), logger, metrics)
 	defer pipeline.Close()
 	app := fiber.New(fiber.Config{BodyLimit: cfg.MaxBodyBytes, DisableStartupMessage: true})
-	httpapi.New(cfg, registry, limiter, auditor, pipeline, metrics).Register(app)
-	if cfg.AdminToken != "" && repo != nil {
+	httpapi.New(cfg, registry, policies, keys, limiter, auditor, pipeline, metrics).Register(app)
+	if cfg.AdminToken != "" {
 		admin := fiber.New(fiber.Config{DisableStartupMessage: true})
-		(&httpapi.Admin{Token: cfg.AdminToken, Repo: repo, Rules: registry, Events: pipeline, RuleChanged: func(ctx context.Context, scope string) {
+		(&httpapi.Admin{Token: cfg.AdminToken, Repo: repo, Rules: registry, Events: pipeline, Keys: keys, Policies: policies, PolicyChanged: func(ctx context.Context) {
+			if policyNotifier != nil {
+				policyNotifier.Notify(ctx)
+			}
+		}, RuleChanged: func(ctx context.Context, scope string) {
 			if cachedRules != nil {
 				cachedRules.Invalidate(ctx, scope)
 			}
@@ -101,8 +131,6 @@ func main() {
 				logger.Error("admin API stopped", slog.Any("error", err))
 			}
 		}()
-	} else if cfg.AdminToken != "" {
-		logger.Warn("admin API disabled because PostgreSQL is unavailable")
 	}
 	logger.Info("gateway listening", slog.String("addr", cfg.ListenAddr), slog.String("upstream", cfg.UpstreamURL))
 	if err := app.Listen(cfg.ListenAddr); err != nil {

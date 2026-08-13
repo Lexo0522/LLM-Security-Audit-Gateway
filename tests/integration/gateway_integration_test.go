@@ -4,12 +4,15 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/example/ai-audit-gateway/internal/audit"
+	"github.com/example/ai-audit-gateway/internal/auth"
 	"github.com/example/ai-audit-gateway/internal/events"
+	"github.com/example/ai-audit-gateway/internal/policy"
 	"github.com/example/ai-audit-gateway/internal/ratelimit"
 	"github.com/example/ai-audit-gateway/internal/storage"
 	"github.com/google/uuid"
@@ -36,6 +39,51 @@ func TestPostgresMigrationAndRedisTokenBucket(t *testing.T) {
 	}
 	if allowed, _, err := limiter.Allow(ctx, "integration:/v1/chat/completions"); err != nil || allowed {
 		t.Fatalf("second request allowed=%v err=%v", allowed, err)
+	}
+}
+
+func TestPostgresGatewayIdentityAndPolicyPersistence(t *testing.T) {
+	ctx := context.Background()
+	repo, err := storage.Open(ctx, os.Getenv("POSTGRES_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+	if err = repo.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = repo.EnsurePolicies(ctx); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := auth.NewManager(repo, "0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, key, err := manager.Create(ctx, "tenant-persistence")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := manager.Authenticate(ctx, "Bearer "+key)
+	if err != nil || identity.TenantID != record.TenantID {
+		t.Fatalf("identity=%+v err=%v", identity, err)
+	}
+	if _, found, err := manager.Revoke(ctx, record.ID); err != nil || !found {
+		t.Fatalf("revoke found=%v err=%v", found, err)
+	}
+	if _, err = manager.Authenticate(ctx, "Bearer "+key); !errors.Is(err, auth.ErrInvalidKey) {
+		t.Fatalf("revoked key error=%v", err)
+	}
+	created, err := repo.CreatePolicy(ctx, policy.Policy{Scope: "tenant:tenant-persistence", RoutePath: "/v1/chat/completions", Direction: "request", MonitorAt: 10, InterventionAt: 20, InterventionAction: policy.Redact, AuditorFailureMode: "fail_closed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := policy.NewResolver(repo)
+	if err = resolver.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	resolved := resolver.Resolve("tenant-persistence", "/v1/chat/completions", "request")
+	if resolved.ID != created.ID || resolved.InterventionAction != policy.Redact {
+		t.Fatalf("resolved=%+v", resolved)
 	}
 }
 

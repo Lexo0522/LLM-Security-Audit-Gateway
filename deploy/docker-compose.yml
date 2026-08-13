@@ -15,6 +15,7 @@ services:
       KAFKA_BROKERS: "kafka:9092"
       KAFKA_AUDIT_TOPIC: "${KAFKA_AUDIT_TOPIC:-audit.events}"
       ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:-}"
+      GATEWAY_API_KEY_PEPPER: "${GATEWAY_API_KEY_PEPPER:?GATEWAY_API_KEY_PEPPER is required and must be at least 32 bytes}"
     depends_on:
       - newapi
       - postgres
