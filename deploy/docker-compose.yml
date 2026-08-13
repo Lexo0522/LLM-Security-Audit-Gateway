@@ -10,6 +10,8 @@ services:
       NEWAPI_BASE_URL: "${NEWAPI_BASE_URL:-http://newapi:3000}"
       NEWAPI_API_KEY: "${NEWAPI_API_KEY:-}"
       AUDIT_ENABLED: "${AUDIT_ENABLED:-true}"
+      SSE_AUDIT_WINDOW_BYTES: "${SSE_AUDIT_WINDOW_BYTES:-16384}"
+      SSE_MAX_EVENT_BYTES: "${SSE_MAX_EVENT_BYTES:-262144}"
       POSTGRES_URL: "postgres://audit:${POSTGRES_PASSWORD:-change-me}@postgres:5432/audit_gateway?sslmode=disable"
       REDIS_URL: "redis://redis:6379/0"
       KAFKA_BROKERS: "kafka:9092"

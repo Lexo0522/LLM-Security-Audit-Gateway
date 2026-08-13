@@ -20,6 +20,7 @@ import (
 	"github.com/example/ai-audit-gateway/internal/proxy"
 	"github.com/example/ai-audit-gateway/internal/ratelimit"
 	"github.com/example/ai-audit-gateway/internal/rule"
+	"github.com/example/ai-audit-gateway/internal/stream"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
@@ -141,7 +142,35 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		go h.shadow(input, result, ruleVersion, configured, body)
 	}
 	c.Set(fiber.HeaderContentType, c.Get(fiber.HeaderContentType, "application/json"))
-	inspect := func(chunk []byte) bool {
+	streamWindows := stream.NewWindows(h.cfg.SSEAuditWindowBytes)
+	streamContext, cancelStream := context.WithCancel(requestContext)
+	defer cancelStream()
+	terminationCode := ""
+	inspect := func(event stream.Event) bool {
+		for _, fragment := range event.Fragments {
+			responseInput := input
+			responseInput.Direction = audit.DirectionResponse
+			responseInput.Text = normalize.Text(streamWindows.Feed(fragment.Channel, fragment.Text))
+			responseResult, responseVersion := h.rules.Audit(streamContext, identity.TenantID, responseInput)
+			responsePolicy := h.policies.Resolve(identity.TenantID, c.Path(), "response")
+			responseDecision := policy.Elevate(responseResult, policy.Decide(responseResult, responsePolicy))
+			h.metrics.Inc("audit_rule_decisions_total", map[string]string{"decision": string(responseDecision), "direction": "response"})
+			metadata := map[string]string{"sse": "true", "sse_channel": fragment.Channel}
+			if h.cfg.AuditEnabled && responseDecision == policy.Block {
+				terminationCode = "stream_policy_blocked"
+				metadata["stream_termination_reason"] = terminationCode
+				h.emitMetadata(responseInput, responseResult, responseVersion, responsePolicy, responseDecision, nil, "", time.Now(), fragment.Text, metadata)
+				cancelStream()
+				return false
+			}
+			h.emitMetadata(responseInput, responseResult, responseVersion, responsePolicy, responseDecision, nil, "", time.Now(), fragment.Text, metadata)
+			if h.cfg.AuditEnabled && responseDecision == policy.Allow && h.cfg.AuditorURL != "" {
+				go h.shadow(responseInput, responseResult, responseVersion, responsePolicy, fragment.Text)
+			}
+		}
+		return true
+	}
+	inspectNonStream := func(chunk []byte) bool {
 		responseInput := input
 		responseInput.Direction = audit.DirectionResponse
 		responseInput.Text = normalize.Text(chunk)
@@ -155,17 +184,29 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		}
 		return !h.cfg.AuditEnabled || responseDecision != policy.Block
 	}
-	err = h.upstream.Do(requestContext, c.Method(), c.Path(), body, c.GetReqHeaders(), c.Response().BodyWriter(), func(status int, headers http.Header) {
-		for key, values := range headers {
-			for _, value := range values {
-				c.Response().Header.Add(key, value)
-			}
-		}
+	err = h.upstream.Do(streamContext, c.Method(), c.Path(), body, c.GetReqHeaders(), c.Response().BodyWriter(), func(status int, headers http.Header) {
+		copyResponseHeaders(c, headers)
 		c.Status(status)
-	}, inspect)
+	}, inspectNonStream, inspect)
 	var inspectionBlocked *proxy.InspectionBlockedError
 	if errors.As(err, &inspectionBlocked) {
 		if inspectionBlocked.ResponseStarted {
+			cancelStream()
+			code := inspectionBlocked.Code
+			if code == "" {
+				code = terminationCode
+			}
+			if code == "" {
+				code = "stream_policy_blocked"
+			}
+			if code == "sse_event_too_large" {
+				responseInput := input
+				responseInput.Direction = audit.DirectionResponse
+				responsePolicy := h.policies.Resolve(identity.TenantID, c.Path(), "response")
+				h.emitMetadata(responseInput, audit.Result{}, ruleVersion, responsePolicy, policy.Block, nil, "", time.Now(), nil, map[string]string{"sse": "true", "stream_termination_reason": code})
+			}
+			_, _ = c.Response().BodyWriter().Write(stream.SecurityTermination(code, requestID))
+			stream.Flush(c.Response().BodyWriter())
 			return nil
 		}
 		return blocked(c, "response_policy_blocked", "response blocked by audit policy")
@@ -185,16 +226,20 @@ func (h *Handler) shadow(input audit.Input, result audit.Result, ruleVersion str
 }
 
 func (h *Handler) emit(input audit.Input, result audit.Result, ruleVersion string, configured policy.Policy, decision policy.Decision, model *audit.ModelResult, auditorErr string, started time.Time, body []byte) {
+	h.emitMetadata(input, result, ruleVersion, configured, decision, model, auditorErr, started, body, nil)
+}
+
+func (h *Handler) emitMetadata(input audit.Input, result audit.Result, ruleVersion string, configured policy.Policy, decision policy.Decision, model *audit.ModelResult, auditorErr string, started time.Time, body []byte, metadata map[string]string) {
 	if h.events == nil {
 		return
 	}
 	hash := sha256.Sum256(body)
-	h.events.Enqueue(audit.Event{SchemaVersion: "2", EventID: uuid.NewString(), EventTime: time.Now().UTC(), RequestID: input.RequestID, TenantID: input.TenantID, APIKeyID: input.APIKeyID, Direction: input.Direction, Path: input.Path, Model: input.Model, Decision: string(decision), RiskScore: result.Score, RuleVersion: ruleVersion, PolicyID: configured.ID, PolicyRevision: configured.Revision, Matches: result.Matches, Auditor: model, AuditorError: auditorErr, LatencyMS: time.Since(started).Milliseconds(), BodyBytes: len(body), ContentSHA256: hex.EncodeToString(hash[:])})
+	h.events.Enqueue(audit.Event{SchemaVersion: "2", EventID: uuid.NewString(), EventTime: time.Now().UTC(), RequestID: input.RequestID, TenantID: input.TenantID, APIKeyID: input.APIKeyID, Direction: input.Direction, Path: input.Path, Model: input.Model, Decision: string(decision), RiskScore: result.Score, RuleVersion: ruleVersion, PolicyID: configured.ID, PolicyRevision: configured.Revision, Matches: result.Matches, Auditor: model, AuditorError: auditorErr, LatencyMS: time.Since(started).Milliseconds(), BodyBytes: len(body), ContentSHA256: hex.EncodeToString(hash[:]), Metadata: metadata})
 }
 
 func endpoint(path string) string {
 	switch path {
-	case "/v1/chat/completions", "/v1/completions", "/v1/embeddings":
+	case "/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/responses":
 		return path
 	default:
 		return "/v1/other"
@@ -208,6 +253,19 @@ func invalidAPIKey(c *fiber.Ctx) error {
 }
 func identityUnavailable(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": fiber.Map{"message": "gateway identity service unavailable", "type": "service_unavailable", "code": "identity_unavailable"}})
+}
+
+func copyResponseHeaders(c *fiber.Ctx, headers http.Header) {
+	for key, values := range headers {
+		switch http.CanonicalHeaderKey(key) {
+		case "Connection", "Content-Length", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade":
+			continue
+		}
+		c.Response().Header.Del(key)
+		for _, value := range values {
+			c.Response().Header.Add(key, value)
+		}
+	}
 }
 func requestModel(body []byte) string {
 	var value struct {

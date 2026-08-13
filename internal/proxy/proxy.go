@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,7 +17,10 @@ import (
 
 // InspectionBlockedError reports whether a streaming response may already have
 // reached the client when a response-side policy blocks subsequent content.
-type InspectionBlockedError struct{ ResponseStarted bool }
+type InspectionBlockedError struct {
+	ResponseStarted bool
+	Code            string
+}
 
 func (e *InspectionBlockedError) Error() string { return "upstream response blocked by audit policy" }
 
@@ -29,7 +33,10 @@ func New(cfg config.Config) *Client {
 	return &Client{cfg: cfg, http: &http.Client{Timeout: time.Duration(cfg.RequestTimeoutMS) * time.Millisecond}}
 }
 
-func (c *Client) Do(ctx context.Context, method, path string, body []byte, headers http.Header, dst io.Writer, onHeaders func(int, http.Header), inspect func([]byte) bool) error {
+// Do forwards a request to the configured upstream. Non-SSE responses are
+// inspected as one bounded body, while SSE responses are inspected as complete
+// events before each event is written to the client.
+func (c *Client) Do(ctx context.Context, method, path string, body []byte, headers http.Header, dst io.Writer, onHeaders func(int, http.Header), inspectResponse func([]byte) bool, inspectSSE stream.Inspector) error {
 	target, err := url.JoinPath(c.cfg.UpstreamURL, path)
 	if err != nil {
 		return err
@@ -48,10 +55,15 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, heade
 	}
 	defer resp.Body.Close()
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		onHeaders(resp.StatusCode, resp.Header)
-		if err := stream.Copy(ctx, dst, resp.Body, inspect); err != nil {
-			if err == io.ErrClosedPipe {
-				return &InspectionBlockedError{ResponseStarted: true}
+		if onHeaders != nil {
+			onHeaders(resp.StatusCode, resp.Header)
+		}
+		if err := stream.Copy(ctx, dst, resp.Body, c.cfg.SSEMaxEventBytes, inspectSSE); err != nil {
+			if errors.Is(err, stream.ErrInspectionBlocked) {
+				return &InspectionBlockedError{ResponseStarted: true, Code: "stream_policy_blocked"}
+			}
+			if errors.Is(err, stream.ErrEventTooLarge) {
+				return &InspectionBlockedError{ResponseStarted: true, Code: "sse_event_too_large"}
 			}
 			return err
 		}
@@ -64,10 +76,12 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, heade
 	if len(data) > c.cfg.MaxResponseBytes {
 		return fmt.Errorf("upstream response exceeds limit")
 	}
-	if !inspect(data) {
+	if inspectResponse != nil && !inspectResponse(data) {
 		return &InspectionBlockedError{}
 	}
-	onHeaders(resp.StatusCode, resp.Header)
+	if onHeaders != nil {
+		onHeaders(resp.StatusCode, resp.Header)
+	}
 	_, err = dst.Write(data)
 	return err
 }

@@ -29,6 +29,7 @@ func TestResolverPrecedence(t *testing.T) {
 		{ID: "global-route", Scope: "global", RoutePath: "/v1/chat/completions", Direction: "request", MonitorAt: 25, InterventionAt: 70, InterventionAction: Block, AuditorFailureMode: "fail_open"},
 		{ID: "tenant-default", Scope: "tenant:tenant-a", RoutePath: "*", Direction: "request", MonitorAt: 20, InterventionAt: 60, InterventionAction: Redact, AuditorFailureMode: "fail_closed"},
 		{ID: "tenant-route", Scope: "tenant:tenant-a", RoutePath: "/v1/chat/completions", Direction: "request", MonitorAt: 10, InterventionAt: 50, InterventionAction: Block, AuditorFailureMode: "fail_closed"},
+		{ID: "responses-route", Scope: "tenant:tenant-a", RoutePath: "/v1/responses", Direction: "response", MonitorAt: 15, InterventionAt: 55, InterventionAction: Block, AuditorFailureMode: "fail_open"},
 	}})
 	if err := resolver.Refresh(t.Context()); err != nil {
 		t.Fatal(err)
@@ -44,5 +45,8 @@ func TestResolverPrecedence(t *testing.T) {
 	}
 	if got := resolver.Resolve("tenant-b", "/v1/embeddings", "request"); got.ID != "global-default" {
 		t.Fatalf("got %q", got.ID)
+	}
+	if got := resolver.Resolve("tenant-a", "/v1/responses", "response"); got.ID != "responses-route" {
+		t.Fatalf("responses policy got %q", got.ID)
 	}
 }

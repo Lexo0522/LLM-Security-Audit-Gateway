@@ -12,6 +12,22 @@ Run the real PostgreSQL/Redis/Kafka smoke test with Docker Desktop available:
 
 The normal `go test ./...` command remains Docker-free. Rule create, publish, and rollback requests are emitted through the same best-effort audit pipeline as proxy traffic, with schema version `2`. These events retain only operation metadata, scope, outcome, and a SHA-256 digest of the administrator token.
 
+## SSE incremental auditing and safe termination
+
+Streaming Chat Completions, Legacy Completions, and Responses API responses are parsed as SSE events before forwarding. The gateway audits Chat `choices[].delta.content`, `choices[].delta.tool_calls[].function.arguments`, `choices[].delta.function_call.arguments`, and Legacy `choices[].text`. For `/v1/responses`, it audits `response.output_text.delta`, `response.function_call_arguments.delta`, `response.refusal.delta`, `response.reasoning_text.delta`, and `response.reasoning_summary_text.delta` events through their non-empty JSON `delta` fields. Comments, non-JSON data, unknown event types/JSON fields, and `[DONE]` remain wire-compatible pass-through events.
+
+The gateway keeps an independent rolling semantic window for each choice/content or tool-argument channel, and for each Responses event type plus its item/output/content-or-summary identity. This detects a high-risk string split across events without combining unrelated choices, outputs, tool calls, refusals, or reasoning. `SSE_AUDIT_WINDOW_BYTES` defaults to `16384`; `SSE_MAX_EVENT_BYTES` defaults to `262144` and caps the raw bytes of one complete SSE event.
+
+When a response policy blocks an event, or when an event exceeds the size limit, the gateway cancels the upstream request, does not forward the triggering event, then emits one final event and closes the stream (without adding `[DONE]`):
+
+```text
+event: gateway.security_terminated
+data: {"error":{"type":"security_termination","code":"stream_policy_blocked","message":"stream response blocked by audit policy","request_id":"<request-id>"}}
+
+```
+
+The alternative size-limit code is `sse_event_too_large`. This event never reveals matched rules, evidence, scores, policies, or model-auditor details. Events already delivered before a later match cannot be retracted. A `redact` decision only redacts audit evidence; it does not alter the upstream SSE bytes.
+
 ## Gateway API keys and policy management
 
 Public `/v1/*` calls require a gateway-issued `Authorization: Bearer agw.<uuid>.<secret>` value. The gateway derives the tenant from that key and ignores (and never forwards) caller-provided `X-Tenant-ID`. Set `POSTGRES_URL` and a random `GATEWAY_API_KEY_PEPPER` of at least 32 bytes before starting; identity storage failure returns `503` rather than allowing an unauthenticated request.

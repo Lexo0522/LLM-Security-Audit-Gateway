@@ -174,7 +174,7 @@ func Validate(p Policy) error {
 	if p.Scope != "global" && (!strings.HasPrefix(p.Scope, "tenant:") || len(strings.TrimPrefix(p.Scope, "tenant:")) == 0) {
 		return fmt.Errorf("policy scope must be global or tenant:<id>")
 	}
-	if p.RoutePath != "*" && p.RoutePath != "/v1/chat/completions" && p.RoutePath != "/v1/completions" && p.RoutePath != "/v1/embeddings" {
+	if p.RoutePath != "*" && p.RoutePath != "/v1/chat/completions" && p.RoutePath != "/v1/completions" && p.RoutePath != "/v1/embeddings" && p.RoutePath != "/v1/responses" {
 		return fmt.Errorf("unsupported policy route_path")
 	}
 	if p.Direction != "request" && p.Direction != "response" {
