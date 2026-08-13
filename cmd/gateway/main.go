@@ -88,19 +88,18 @@ func main() {
 			}
 		})
 	}
+	// PostgreSQL is the snapshot authority. Redis only accelerates invalidation;
+	// it must never be in the polling path or make a valid snapshot stale.
 	loader := rule.RuleLoader(repo)
 	if !cfg.AllowDemoBootstrap {
 		loader = managedRuleLoader{repo: repo}
 	}
 	var cachedRules *rule.CacheLoader
-	if cfg.AllowDemoBootstrap {
-		cachedRules, err = rule.NewCacheLoader(repo, cfg.RedisURL, metrics)
-		if err != nil {
-			logger.Warn("redis rule cache unavailable", slog.Any("error", err))
-		}
+	cachedRules, err = rule.NewCacheLoader(repo, cfg.RedisURL, metrics)
+	if err != nil {
+		logger.Warn("redis rule notifications unavailable", slog.Any("error", err))
 	}
 	if cachedRules != nil {
-		loader = cachedRules
 		defer cachedRules.Close()
 	}
 	registry, err := rule.NewRegistry(loader, bootstrapRules)
@@ -122,6 +121,8 @@ func main() {
 	} else if err = registry.Refresh(ctx, "global"); err != nil {
 		logger.Error("load managed rule snapshot", slog.Any("error", err))
 		return
+	} else {
+		registry.SetGlobalSource("managed")
 	}
 	if cachedRules != nil {
 		cachedRules.Subscribe(context.Background(), func(scope string) {

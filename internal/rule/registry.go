@@ -107,7 +107,9 @@ func (r *Registry) Refresh(ctx context.Context, scope string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if scope == "global" {
-		r.global, r.globalVersion, r.globalSource, r.globalStale = engine, version, "managed", false
+		// Source is configuration metadata, not an inference from a successful
+		// refresh. In particular, a development loader may serve a demo snapshot.
+		r.global, r.globalVersion, r.globalStale = engine, version, false
 	} else {
 		tenant := scope[len("tenant:"):]
 		r.tenants[tenant] = &tenantSnapshot{engine, version}

@@ -87,6 +87,37 @@ func TestPostgresGatewayIdentityAndPolicyPersistence(t *testing.T) {
 	}
 }
 
+func TestPostgresAuditEventPersistence(t *testing.T) {
+	ctx := context.Background()
+	repo, err := storage.Open(ctx, os.Getenv("POSTGRES_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+	if err = repo.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	event := audit.Event{
+		SchemaVersion: "2",
+		EventID:       uuid.NewString(),
+		EventTime:     time.Now().UTC(),
+		RequestID:     "integration-audit-persistence",
+		TenantID:      "tenant-persistence",
+		Direction:     audit.DirectionRequest,
+		Path:          "/v1/chat/completions",
+		Decision:      "allow",
+		RuleVersion:   "integration",
+	}
+	if err := repo.StoreEvents(ctx, []audit.Event{event}); err != nil {
+		t.Fatalf("store audit event: %v", err)
+	}
+	// Retries preserve the event ID. This must work with the partial unique
+	// event_id index used by pre-existing installations as well as fresh ones.
+	if err := repo.StoreEvents(ctx, []audit.Event{event}); err != nil {
+		t.Fatalf("store duplicate audit event: %v", err)
+	}
+}
+
 func TestKafkaAuditEventSchemaAndTenantKey(t *testing.T) {
 	topic := "audit.events.integration"
 	publisher := events.NewKafka([]string{os.Getenv("KAFKA_BROKER")}, topic)

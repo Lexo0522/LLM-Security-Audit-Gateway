@@ -7,6 +7,15 @@ import (
 	"github.com/example/ai-audit-gateway/internal/audit"
 )
 
+type staticLoader struct {
+	rules   []Definition
+	version string
+}
+
+func (l staticLoader) ActiveDefinitions(context.Context, string) ([]Definition, string, error) {
+	return l.rules, l.version, nil
+}
+
 func TestEngineMatchesKeywordAndRegex(t *testing.T) {
 	engine, err := New([]Definition{
 		{ID: "keyword", Pattern: "ignore previous instructions", Weight: 50},
@@ -50,5 +59,18 @@ func TestRegistryReadinessRequiresManagedFreshSnapshot(t *testing.T) {
 	registry.MarkStale()
 	if registry.Ready() {
 		t.Fatal("stale snapshot must not be ready")
+	}
+}
+
+func TestRegistryRefreshDoesNotInferManagedSource(t *testing.T) {
+	registry, err := NewRegistry(staticLoader{rules: []Definition{{ID: "demo", Pattern: "demo"}}, version: "v1"}, []Definition{{ID: "bootstrap", Pattern: "bootstrap"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Refresh(context.Background(), "global"); err != nil {
+		t.Fatal(err)
+	}
+	if got := registry.Status().Source; got != "demo" {
+		t.Fatalf("refresh inferred source %q; want demo", got)
 	}
 }

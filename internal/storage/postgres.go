@@ -457,7 +457,11 @@ func (r *Repository) StoreEvents(ctx context.Context, events []audit.Event) erro
 		if e.Auditor != nil {
 			auditor, _ = json.Marshal(e.Auditor)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO audit_records(id,event_id,request_id,tenant_id,direction,path,model,risk_score,decision,rule_version,matches,auditor,auditor_error,latency_ms,body_bytes,content_sha256,metadata,api_key_id,policy_id,policy_revision,created_at) VALUES($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT (event_id) DO NOTHING`, e.EventID, e.RequestID, e.TenantID, e.Direction, e.Path, e.Model, e.RiskScore, e.Decision, e.RuleVersion, matches, auditor, e.AuditorError, e.LatencyMS, e.BodyBytes, e.ContentSHA256, metadata, nullableUUID(e.APIKeyID), nullableUUID(e.PolicyID), nullableRevision(e.PolicyRevision), e.EventTime); err != nil {
+		// Older installations use a partial unique index for event_id. PostgreSQL
+		// cannot use a partial index as an ON CONFLICT(event_id) arbiter without
+		// repeating its predicate, so let it infer any applicable unique index.
+		// This retains event-id idempotency while remaining migration-compatible.
+		if _, err := tx.Exec(ctx, `INSERT INTO audit_records(id,event_id,request_id,tenant_id,direction,path,model,risk_score,decision,rule_version,matches,auditor,auditor_error,latency_ms,body_bytes,content_sha256,metadata,api_key_id,policy_id,policy_revision,created_at) VALUES($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT DO NOTHING`, e.EventID, e.RequestID, e.TenantID, e.Direction, e.Path, e.Model, e.RiskScore, e.Decision, e.RuleVersion, matches, auditor, e.AuditorError, e.LatencyMS, e.BodyBytes, e.ContentSHA256, metadata, nullableUUID(e.APIKeyID), nullableUUID(e.PolicyID), nullableRevision(e.PolicyRevision), e.EventTime); err != nil {
 			return err
 		}
 		if r.outboxEnabled.Load() {
