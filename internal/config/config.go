@@ -23,6 +23,10 @@ type Config struct {
 	RedisURL                  string
 	KafkaBrokers              []string
 	KafkaAuditTopic           string
+	KafkaAuditDLQTopic        string
+	KafkaConsumerGroup        string
+	ClickHouseDSN             string
+	ConsumerListenAddr        string
 	AdminToken                string
 	RateLimitRPS              int
 	RateLimitBurst            int
@@ -56,6 +60,10 @@ func Load() Config {
 		RedisURL:                  os.Getenv("REDIS_URL"),
 		KafkaBrokers:              envList("KAFKA_BROKERS"),
 		KafkaAuditTopic:           env("KAFKA_AUDIT_TOPIC", "audit.events"),
+		KafkaAuditDLQTopic:        env("KAFKA_AUDIT_DLQ_TOPIC", ""),
+		KafkaConsumerGroup:        env("KAFKA_CONSUMER_GROUP", "audit-clickhouse-v1"),
+		ClickHouseDSN:             os.Getenv("CLICKHOUSE_DSN"),
+		ConsumerListenAddr:        env("AUDIT_CONSUMER_LISTEN_ADDR", ":9090"),
 		AdminToken:                os.Getenv("ADMIN_API_TOKEN"),
 		RateLimitRPS:              envInt("RATE_LIMIT_RPS", 60),
 		RateLimitBurst:            envInt("RATE_LIMIT_BURST", 120),

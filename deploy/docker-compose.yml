@@ -5,6 +5,7 @@ services:
       dockerfile: deploy/Dockerfile.gateway
     ports:
       - "8080:8080"
+      - "8081:8081"
     environment:
       # Compose is a local development stack. Production must seed managed
       # rules and policies before the gateway starts.
@@ -20,6 +21,7 @@ services:
       REDIS_URL: "redis://redis:6379/0"
       KAFKA_BROKERS: "kafka:9092"
       KAFKA_AUDIT_TOPIC: "${KAFKA_AUDIT_TOPIC:-audit.events}"
+      CLICKHOUSE_DSN: "http://audit:${CLICKHOUSE_PASSWORD:-change-me}@clickhouse:8123/default"
       ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:-}"
       GATEWAY_API_KEY_PEPPER: "${GATEWAY_API_KEY_PEPPER:?GATEWAY_API_KEY_PEPPER is required and must be at least 32 bytes}"
     depends_on:
@@ -27,6 +29,25 @@ services:
       - postgres
       - redis
       - kafka
+    restart: unless-stopped
+
+  audit-consumer:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    entrypoint: ["/audit-consumer"]
+    expose:
+      - "9090"
+    environment:
+      KAFKA_BROKERS: "kafka:9092"
+      KAFKA_AUDIT_TOPIC: "${KAFKA_AUDIT_TOPIC:-audit.events}"
+      KAFKA_AUDIT_DLQ_TOPIC: "${KAFKA_AUDIT_DLQ_TOPIC:-audit.events.dlq}"
+      KAFKA_CONSUMER_GROUP: "${KAFKA_CONSUMER_GROUP:-audit-clickhouse-v1}"
+      CLICKHOUSE_DSN: "http://audit:${CLICKHOUSE_PASSWORD:-change-me}@clickhouse:8123/default"
+      AUDIT_CONSUMER_LISTEN_ADDR: ":9090"
+    depends_on:
+      - kafka
+      - clickhouse
     restart: unless-stopped
 
   newapi:
@@ -57,8 +78,15 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.12-alpine
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: audit
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-change-me}"
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     expose:
       - "8123"
+    ports:
+      - "${INTEGRATION_CLICKHOUSE_PORT:-18123}:8123"
     volumes:
       - clickhouse-data:/var/lib/clickhouse
     restart: unless-stopped

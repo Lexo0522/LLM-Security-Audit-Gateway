@@ -10,6 +10,7 @@ import (
 
 	"github.com/example/ai-audit-gateway/internal/audit"
 	"github.com/example/ai-audit-gateway/internal/auth"
+	clickstore "github.com/example/ai-audit-gateway/internal/clickhouse"
 	"github.com/example/ai-audit-gateway/internal/events"
 	"github.com/example/ai-audit-gateway/internal/policy"
 	"github.com/example/ai-audit-gateway/internal/rule"
@@ -27,6 +28,7 @@ type Admin struct {
 	Keys          *auth.Manager
 	Policies      *policy.Resolver
 	PolicyChanged func(context.Context)
+	Audit         AuditReader
 }
 
 func (a *Admin) Register(app *fiber.App) {
@@ -43,6 +45,15 @@ func (a *Admin) Register(app *fiber.App) {
 	app.Get("/admin/v1/policies", a.listPolicies)
 	app.Put("/admin/v1/policies/:id", a.updatePolicy)
 	app.Delete("/admin/v1/policies/:id", a.deletePolicy)
+	app.Get("/admin/v1/audit/events", a.listAuditEvents)
+	app.Get("/admin/v1/audit/events/:event_id", a.getAuditEvent)
+	app.Get("/admin/v1/audit/summary", a.auditSummary)
+}
+
+type AuditReader interface {
+	ListEvents(context.Context, clickstore.EventFilter) (clickstore.EventPage, error)
+	GetEvent(context.Context, string) (audit.Event, error)
+	Summary(context.Context, clickstore.EventFilter, string) (clickstore.Summary, error)
 }
 
 func (a *Admin) authenticate(c *fiber.Ctx) error {

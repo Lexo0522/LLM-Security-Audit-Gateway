@@ -1,0 +1,11 @@
+.git
+.cache
+.env
+.env.*
+web
+docs
+tests
+migrations
+configs
+*.md
+*.txt

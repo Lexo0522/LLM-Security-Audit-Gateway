@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/example/ai-audit-gateway/internal/audit"
 	"github.com/example/ai-audit-gateway/internal/auth"
+	clickstore "github.com/example/ai-audit-gateway/internal/clickhouse"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -23,6 +26,23 @@ func (s *adminKeyStore) CreateGatewayAPIKey(_ context.Context, record auth.KeyRe
 	record.CreatedAt = time.Now().UTC()
 	s.records[record.ID] = record
 	return record, nil
+}
+
+type auditReaderStub struct {
+	page    clickstore.EventPage
+	event   audit.Event
+	summary clickstore.Summary
+}
+
+func (s auditReaderStub) ListEvents(_ context.Context, filter clickstore.EventFilter) (clickstore.EventPage, error) {
+	if filter.TenantID != "tenant-a" || filter.Model != "gpt-test" || filter.RuleID != "rule-a" || filter.Limit != 10 {
+		return clickstore.EventPage{}, errors.New("filter not forwarded")
+	}
+	return s.page, nil
+}
+func (s auditReaderStub) GetEvent(context.Context, string) (audit.Event, error) { return s.event, nil }
+func (s auditReaderStub) Summary(context.Context, clickstore.EventFilter, string) (clickstore.Summary, error) {
+	return s.summary, nil
 }
 func (s *adminKeyStore) LookupGatewayAPIKey(_ context.Context, id string) (auth.KeyRecord, bool, error) {
 	value, found := s.records[id]
@@ -100,4 +120,29 @@ func TestAdminAPIKeyLifecycleDoesNotLeakKeyMaterial(t *testing.T) {
 		}
 		response.Body.Close()
 	}
+}
+
+func TestAdminAuditQueriesRequireTokenAndForwardFilters(t *testing.T) {
+	app := fiber.New()
+	reader := auditReaderStub{page: clickstore.EventPage{Events: []audit.Event{{EventID: "event"}}}, summary: clickstore.Summary{TotalEvents: 1}}
+	(&Admin{Token: "admin-token", Audit: reader}).Register(app)
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/audit/events?tenant_id=tenant-a&model=gpt-test&rule_id=rule-a&page_size=10", nil)
+	response, err := app.Test(request)
+	if err != nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status=%v err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+	request.Header.Set("Authorization", "Bearer admin-token")
+	response, err = app.Test(request)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("authorized status=%v err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+	invalid := httptest.NewRequest(http.MethodGet, "/admin/v1/audit/events?min_risk_score=not-a-number", nil)
+	invalid.Header.Set("Authorization", "Bearer admin-token")
+	response, err = app.Test(invalid)
+	if err != nil || response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid status=%v err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
 }

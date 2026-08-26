@@ -4,6 +4,8 @@ package integration
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -11,6 +13,8 @@ import (
 
 	"github.com/example/ai-audit-gateway/internal/audit"
 	"github.com/example/ai-audit-gateway/internal/auth"
+	clickstore "github.com/example/ai-audit-gateway/internal/clickhouse"
+	"github.com/example/ai-audit-gateway/internal/consumer"
 	"github.com/example/ai-audit-gateway/internal/events"
 	"github.com/example/ai-audit-gateway/internal/policy"
 	"github.com/example/ai-audit-gateway/internal/ratelimit"
@@ -39,6 +43,93 @@ func TestPostgresMigrationAndRedisTokenBucket(t *testing.T) {
 	}
 	if allowed, _, err := limiter.Allow(ctx, "integration:/v1/chat/completions"); err != nil || allowed {
 		t.Fatalf("second request allowed=%v err=%v", allowed, err)
+	}
+}
+
+func TestKafkaAuditEventIsAvailableInClickHouse(t *testing.T) {
+	ctx := context.Background()
+	destination, err := clickstore.Open(os.Getenv("CLICKHOUSE_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	if err = destination.EnsureSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	topic := "audit.events.clickhouse.integration"
+	group := "audit-clickhouse-integration-" + uuid.NewString()
+	delivery, err := consumer.New(consumer.Config{Brokers: []string{os.Getenv("KAFKA_BROKER")}, Topic: topic, GroupID: group}, destination, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumerCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- delivery.Run(consumerCtx) }()
+	defer func() { cancel(); _ = delivery.Close(); <-done }()
+	publisher := events.NewKafka([]string{os.Getenv("KAFKA_BROKER")}, topic)
+	defer publisher.Close()
+	event := audit.Event{SchemaVersion: "2", EventID: uuid.NewString(), EventTime: time.Now().UTC(), RequestID: "clickhouse-consumer", TenantID: "tenant-clickhouse", Direction: audit.DirectionRequest, Path: "/v1/chat/completions", Model: "gpt-integration", Decision: "allow", RiskScore: 15, RuleVersion: "integration", LatencyMS: 12, Matches: []audit.Match{{RuleID: "rule-integration", Name: "integration", Action: "monitor", Weight: 15}}}
+	if err = publisher.Publish(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		stored, queryErr := destination.GetEvent(ctx, event.EventID)
+		if queryErr == nil {
+			if stored.TenantID != event.TenantID {
+				t.Fatalf("stored=%+v", stored)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("clickhouse event did not arrive: %v", queryErr)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	// Re-delivery keeps the same event ID and must collapse at query time.
+	if err = destination.InsertEvents(ctx, []audit.Event{event}); err != nil {
+		t.Fatal(err)
+	}
+	otherTenant := event
+	otherTenant.EventID = uuid.NewString()
+	otherTenant.RequestID = "clickhouse-other-tenant"
+	otherTenant.TenantID = "tenant-other"
+	if err = destination.InsertEvents(ctx, []audit.Event{otherTenant}); err != nil {
+		t.Fatal(err)
+	}
+	filter := clickstore.EventFilter{From: event.EventTime.Add(-time.Minute), To: event.EventTime.Add(time.Minute), TenantID: event.TenantID, Model: event.Model, RuleID: "rule-integration", Limit: 10}
+	page, err := destination.ListEvents(ctx, filter)
+	if err != nil || len(page.Events) != 1 || page.Events[0].TenantID != event.TenantID {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+	summary, err := destination.Summary(ctx, filter, "hour")
+	if err != nil || summary.TotalEvents != 1 || summary.ByModel[event.Model] != 1 || summary.ByRule["rule-integration"] != 1 || summary.MaximumLatencyMS != event.LatencyMS {
+		t.Fatalf("summary=%+v err=%v", summary, err)
+	}
+
+	invalid := []byte{0xff, '{'}
+	invalidWriter := &kafka.Writer{Addr: kafka.TCP(os.Getenv("KAFKA_BROKER")), Topic: topic, RequiredAcks: kafka.RequireAll}
+	if err = invalidWriter.WriteMessages(ctx, kafka.Message{Value: invalid}); err != nil {
+		t.Fatal(err)
+	}
+	_ = invalidWriter.Close()
+	dlqReader := kafka.NewReader(kafka.ReaderConfig{Brokers: []string{os.Getenv("KAFKA_BROKER")}, Topic: topic + ".dlq", Partition: 0, StartOffset: kafka.FirstOffset})
+	defer dlqReader.Close()
+	dlqCtx, dlqCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer dlqCancel()
+	dlqMessage, err := dlqReader.ReadMessage(dlqCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		PayloadBase64 string `json:"payload_base64"`
+	}
+	if err = json.Unmarshal(dlqMessage.Value, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(envelope.PayloadBase64)
+	if err != nil || string(decoded) != string(invalid) {
+		t.Fatalf("decoded=%v err=%v payload=%s", decoded, err, dlqMessage.Value)
 	}
 }
 

@@ -18,6 +18,10 @@ The normal `go test ./...` command remains Docker-free. Rule create, publish, an
 
 Production does not run example rules. Run `go run ./cmd/seed -file ./configs/seed.example.json` before the first gateway start, supplying deployment-owned rules instead of the example. `ALLOW_DEMO_BOOTSTRAP_RULES=true` is allowed only for `GATEWAY_ENV=development` or `test`.
 
+## ClickHouse audit queries
+
+`go run ./cmd/audit-consumer` consumes the Kafka audit topic into ClickHouse using the consumer group `audit-clickhouse-v1`. Set `CLICKHOUSE_DSN` (the Compose stack derives an authenticated DSN from `CLICKHOUSE_PASSWORD`); events are retained for 180 days and deduplicated by `event_id` at query time. Configure the same DSN on the gateway to enable the admin-only endpoints for paged event search, event detail, and hourly/daily summaries. Consumer failure never changes gateway request readiness.
+
 ## SSE incremental auditing and safe termination
 
 Streaming Chat Completions, Legacy Completions, and Responses API responses are parsed as SSE events before forwarding. The gateway audits Chat `choices[].delta.content`, `choices[].delta.tool_calls[].function.arguments`, `choices[].delta.function_call.arguments`, and Legacy `choices[].text`. For `/v1/responses`, it audits `response.output_text.delta`, `response.function_call_arguments.delta`, `response.refusal.delta`, `response.reasoning_text.delta`, and `response.reasoning_summary_text.delta` events through their non-empty JSON `delta` fields. Comments, non-JSON data, unknown event types/JSON fields, and `[DONE]` remain wire-compatible pass-through events.
@@ -40,7 +44,7 @@ Public `/v1/*` calls require a gateway-issued `Authorization: Bearer agw.<uuid>.
 
 With `ADMIN_API_TOKEN` configured on the admin listener, use `POST /admin/v1/api-keys` with `{ "tenant_id": "tenant-a" }` to create a key. The raw key is returned only by that response. `GET /admin/v1/api-keys` lists safe metadata, and `POST /admin/v1/api-keys/:id/revoke` immediately revokes a key. `POST/GET /admin/v1/policies` plus `PUT/DELETE /admin/v1/policies/:id` manage per-scope, route, and direction audit thresholds. `redact` decisions retain hashes and metadata but clear audit evidence; they do not modify proxied model content.
 
-独立部署在用户与 NewAPI 之间的 OpenAI 兼容安全审计网关。当前已提供可运行的 P0/P1 骨架：请求体限制、规则审计、风险评分、阻断、普通响应代理和 SSE 逐行透传扫描。
+独立部署在用户与 NewAPI 之间的 OpenAI 兼容安全审计网关。当前已提供可运行的 P0–P2 主链路：请求体限制、规则审计、风险评分、阻断、普通响应与 SSE 代理、持久化审计、Kafka 投递和 ClickHouse 分析查询。
 
 ## Quick start
 
@@ -76,9 +80,9 @@ Compose 中的 NewAPI 镜像和环境变量仅用于开发起步；生产部署�
 ## 当前边界
 
 - API Key 与策略依赖 PostgreSQL；API Key 原文不落库。策略通过不可变快照解析，并可经 Redis 通知跨实例刷新。
-- 规则使用关键词包含匹配或 Go RE2；Aho-Corasick 自动机将在规则规模扩大时替换关键词实现。
-- ClickHouse consumer、完整 RBAC 和后台 UI 尚未实现。
+- 关键词规则使用内存常驻的 Aho-Corasick 自动机，正则规则使用 Go RE2；规则发布后通过不可变快照原子切换。
+- Kafka→ClickHouse consumer 和只读审计查询已经实现；完整 RBAC、用量/费用事件以及后台 UI 尚未实现。
 - SSE 能在转发前按行扫描，并可在命中阻断时终止后续输出；已经发送的数据无法撤回。
 - 默认示例规则仅用于演示，请在生产环境改为数据库/配置管理。
 
-后续按 `C:\Users\Xing\.claude\plans\ai-api-jazzy-lerdorf.md` 中的 P1–P4 阶段继续实现。
+下一阶段重点是热路径压测、有界影子模型审计和威胁模型；真实审计模型先以异步影子模式校准，再按策略进入同步阻断路径。

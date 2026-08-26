@@ -1,0 +1,235 @@
+// Package consumer provides at-least-once Kafka to ClickHouse audit delivery.
+package consumer
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/example/ai-audit-gateway/internal/audit"
+	store "github.com/example/ai-audit-gateway/internal/clickhouse"
+	"github.com/example/ai-audit-gateway/internal/observability"
+	"github.com/segmentio/kafka-go"
+)
+
+type EventStore interface {
+	EnsureSchema(context.Context) error
+	InsertEvents(context.Context, []audit.Event) error
+	Ping(context.Context) error
+}
+
+type messageWriter interface {
+	WriteMessages(context.Context, ...kafka.Message) error
+	Close() error
+}
+
+type Config struct {
+	Brokers                  []string
+	Topic, DLQTopic, GroupID string
+}
+type Consumer struct {
+	config  Config
+	store   EventStore
+	reader  *kafka.Reader
+	dlq     messageWriter
+	logger  *slog.Logger
+	metrics *observability.Metrics
+	retry   time.Duration
+}
+
+func New(config Config, destination EventStore, logger *slog.Logger, metrics *observability.Metrics) (*Consumer, error) {
+	if len(config.Brokers) == 0 || config.Topic == "" || config.GroupID == "" || destination == nil {
+		return nil, fmt.Errorf("kafka brokers, topic, group id, and clickhouse store are required")
+	}
+	if config.DLQTopic == "" {
+		config.DLQTopic = config.Topic + ".dlq"
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Consumer{config: config, store: destination, logger: logger, metrics: metrics, retry: time.Second, reader: kafka.NewReader(kafka.ReaderConfig{Brokers: config.Brokers, Topic: config.Topic, GroupID: config.GroupID, StartOffset: kafka.FirstOffset, CommitInterval: 0, MaxBytes: 10 << 20}), dlq: &kafka.Writer{Addr: kafka.TCP(config.Brokers...), Topic: config.DLQTopic, RequiredAcks: kafka.RequireAll, Async: false, AllowAutoTopicCreation: true, WriteTimeout: 3 * time.Second, ReadTimeout: 3 * time.Second}}, nil
+}
+func (c *Consumer) Close() error {
+	if c == nil {
+		return nil
+	}
+	_ = c.reader.Close()
+	return c.dlq.Close()
+}
+
+// Run does not return for recoverable Kafka or ClickHouse failures. Offsets are
+// committed only after the destination operation has completed successfully.
+func (c *Consumer) Run(ctx context.Context) error {
+	if c == nil {
+		return fmt.Errorf("consumer disabled")
+	}
+	if err := c.ensureSchema(ctx); err != nil {
+		return err
+	}
+	for {
+		message, err := c.reader.FetchMessage(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			c.metrics.Inc("audit_clickhouse_consumer_kafka_errors_total", nil)
+			c.logger.Warn("fetch kafka audit event", slog.Any("error", err))
+			if !wait(ctx, time.Second) {
+				return nil
+			}
+			continue
+		}
+		batch := []kafka.Message{message}
+		var events []audit.Event
+		invalidReason := ""
+		var event audit.Event
+		if err = json.Unmarshal(message.Value, &event); err != nil {
+			invalidReason = err.Error()
+		} else if validation := store.ValidateEvent(event); validation != nil {
+			invalidReason = validation.Error()
+		} else {
+			events = append(events, event)
+		}
+		batchCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		for invalidReason == "" && len(batch) < 100 {
+			next, fetchErr := c.reader.FetchMessage(batchCtx)
+			if fetchErr != nil {
+				break
+			}
+			var candidate audit.Event
+			batch = append(batch, next)
+			if decodeErr := json.Unmarshal(next.Value, &candidate); decodeErr != nil {
+				invalidReason = decodeErr.Error()
+				break
+			}
+			if validation := store.ValidateEvent(candidate); validation != nil {
+				invalidReason = validation.Error()
+				break
+			}
+			events = append(events, candidate)
+		}
+		cancel()
+		if len(events) > 0 {
+			if err = c.insertWithRetry(ctx, events); err != nil {
+				return err
+			}
+		}
+		if invalidReason != "" {
+			if err = c.publishDLQWithRetry(ctx, batch[len(batch)-1], invalidReason); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				return err
+			}
+		}
+		if err = c.reader.CommitMessages(ctx, batch...); err != nil {
+			c.metrics.Inc("audit_clickhouse_consumer_commits_total", map[string]string{"result": "error"})
+			c.logger.Warn("commit audit offsets", slog.Any("error", err))
+			continue
+		}
+		for range events {
+			c.metrics.Inc("audit_clickhouse_consumer_events_total", map[string]string{"result": "success"})
+		}
+		c.metrics.Inc("audit_clickhouse_consumer_commits_total", map[string]string{"result": "success"})
+	}
+}
+func (c *Consumer) ensureSchema(ctx context.Context) error {
+	for {
+		probe, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := c.store.EnsureSchema(probe)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		c.metrics.Inc("audit_clickhouse_consumer_schema_total", map[string]string{"result": "error"})
+		c.logger.Warn("ensure clickhouse schema", slog.Any("error", err))
+		if !wait(ctx, time.Second) {
+			return ctx.Err()
+		}
+	}
+}
+func (c *Consumer) insertWithRetry(ctx context.Context, events []audit.Event) error {
+	for {
+		insertCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := c.store.InsertEvents(insertCtx, events)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		c.metrics.Inc("audit_clickhouse_consumer_inserts_total", map[string]string{"result": "error"})
+		c.logger.Warn("write clickhouse audit events", slog.Any("error", err))
+		if !wait(ctx, time.Second) {
+			return ctx.Err()
+		}
+	}
+}
+func (c *Consumer) publishDLQ(ctx context.Context, message kafka.Message, reason string) error {
+	payload, err := deadLetterPayload(message, reason)
+	if err != nil {
+		return err
+	}
+	return c.dlq.WriteMessages(ctx, kafka.Message{Key: message.Key, Value: payload, Headers: []kafka.Header{{Key: "source_event", Value: []byte("audit.events")}}})
+}
+
+func (c *Consumer) publishDLQWithRetry(ctx context.Context, message kafka.Message, reason string) error {
+	for {
+		if err := c.publishDLQ(ctx, message, reason); err == nil {
+			c.metrics.Inc("audit_clickhouse_consumer_dlq_total", map[string]string{"result": "success"})
+			return nil
+		} else {
+			c.metrics.Inc("audit_clickhouse_consumer_dlq_total", map[string]string{"result": "error"})
+			c.logger.Warn("publish audit DLQ", slog.Any("error", err))
+		}
+		if !wait(ctx, c.retryDelay()) {
+			return ctx.Err()
+		}
+	}
+}
+
+func (c *Consumer) retryDelay() time.Duration {
+	if c.retry <= 0 {
+		return time.Second
+	}
+	return c.retry
+}
+
+func deadLetterPayload(message kafka.Message, reason string) ([]byte, error) {
+	return json.Marshal(struct {
+		SourceTopic   string `json:"source_topic"`
+		Partition     int    `json:"partition"`
+		Offset        int64  `json:"offset"`
+		Reason        string `json:"reason"`
+		PayloadBase64 string `json:"payload_base64"`
+	}{
+		SourceTopic:   message.Topic,
+		Partition:     message.Partition,
+		Offset:        message.Offset,
+		Reason:        reason,
+		PayloadBase64: base64.StdEncoding.EncodeToString(message.Value),
+	})
+}
+func (c *Consumer) KafkaHealth(ctx context.Context) error {
+	connection, err := kafka.DialContext(ctx, "tcp", c.config.Brokers[0])
+	if err != nil {
+		return err
+	}
+	return connection.Close()
+}
+func (c *Consumer) ClickHouseHealth(ctx context.Context) error { return c.store.Ping(ctx) }
+func wait(ctx context.Context, duration time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(duration):
+		return true
+	}
+}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/example/ai-audit-gateway/internal/audit"
 	"github.com/example/ai-audit-gateway/internal/auth"
+	clickstore "github.com/example/ai-audit-gateway/internal/clickhouse"
 	"github.com/example/ai-audit-gateway/internal/config"
 	"github.com/example/ai-audit-gateway/internal/events"
 	"github.com/example/ai-audit-gateway/internal/health"
@@ -66,6 +67,15 @@ func main() {
 		return
 	}
 	defer repo.Close()
+	var auditStore *clickstore.Store
+	if cfg.ClickHouseDSN != "" {
+		auditStore, err = clickstore.Open(cfg.ClickHouseDSN)
+		if err != nil {
+			logger.Warn("clickhouse audit queries disabled", slog.Any("error", err))
+		} else {
+			defer auditStore.Close()
+		}
+	}
 	keys, err := auth.NewManager(repo, cfg.APIKeyPepper)
 	if err != nil {
 		logger.Error("create API key manager", slog.Any("error", err))
@@ -226,7 +236,7 @@ func main() {
 	handler.Register(app)
 	if cfg.AdminToken != "" {
 		admin := fiber.New(fiber.Config{DisableStartupMessage: true})
-		(&httpapi.Admin{Token: cfg.AdminToken, Repo: repo, Rules: registry, Events: pipeline, Keys: keys, Policies: policies, PolicyChanged: func(ctx context.Context) {
+		(&httpapi.Admin{Token: cfg.AdminToken, Repo: repo, Rules: registry, Events: pipeline, Keys: keys, Policies: policies, Audit: auditStore, PolicyChanged: func(ctx context.Context) {
 			if policyNotifier != nil {
 				policyNotifier.Notify(ctx)
 			}
