@@ -1,0 +1,12 @@
+# golangci-lint v2 configuration.
+version: "2"
+
+linters:
+  exclusions:
+    rules:
+      # Cleanup-path Close calls intentionally drop the error: the resource is
+      # being released anyway and there is no meaningful handler left on the
+      # deferred/ignored path. Every other error return stays fully checked.
+      - source: '\.Close\(\)$'
+        linters:
+          - errcheck

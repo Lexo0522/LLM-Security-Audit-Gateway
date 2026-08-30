@@ -179,11 +179,12 @@ func (r *Resolver) Resolve(tenant, route, direction string) Policy {
 }
 func specificity(candidate Policy, tenant, route string) int {
 	scopeScore := 0
-	if candidate.Scope == "tenant:"+tenant {
+	switch candidate.Scope {
+	case "tenant:" + tenant:
 		scopeScore = 2
-	} else if candidate.Scope == "global" {
+	case "global":
 		scopeScore = 0
-	} else {
+	default:
 		return -1
 	}
 	routeScore := 0
