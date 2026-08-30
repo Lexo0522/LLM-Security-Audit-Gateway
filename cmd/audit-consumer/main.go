@@ -16,8 +16,12 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+// version is injected at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	logger, metrics := observability.Logger(), observability.NewMetrics()
+	logger.Info("starting audit consumer", slog.String("version", version))
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("invalid audit consumer configuration", slog.Any("error", err))

@@ -4,12 +4,13 @@ FROM golang:1.25-alpine AS build
 # enforced by go.sum verification.
 ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=$GOPROXY
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/gateway ./cmd/gateway
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/audit-consumer ./cmd/audit-consumer
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -X main.version=${VERSION}' -o /out/gateway ./cmd/gateway
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -X main.version=${VERSION}' -o /out/audit-consumer ./cmd/audit-consumer
 
 FROM alpine:3.21
 # ca-certificates: upstream, auditor, and ClickHouse may use HTTPS.

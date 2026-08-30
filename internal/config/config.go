@@ -10,6 +10,7 @@ import (
 
 type Config struct {
 	Environment               string
+	Version                   string
 	AllowDemoBootstrap        bool
 	ListenAddr                string
 	AdminAddr                 string

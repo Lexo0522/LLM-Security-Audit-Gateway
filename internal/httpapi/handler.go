@@ -116,7 +116,7 @@ func New(cfg config.Config, rules *rule.Registry, policies *policy.Resolver, ide
 }
 
 func (h *Handler) Register(app *fiber.App) {
-	app.Get("/healthz", func(c *fiber.Ctx) error { return c.JSON(fiber.Map{"status": "ok"}) })
+	app.Get("/healthz", func(c *fiber.Ctx) error { return c.JSON(fiber.Map{"status": "ok", "version": h.cfg.Version}) })
 	app.Get("/metrics", func(c *fiber.Ctx) error {
 		c.Set(fiber.HeaderContentType, "text/plain; version=0.0.4; charset=utf-8")
 		return c.SendString(h.metrics.Render())

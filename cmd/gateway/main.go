@@ -34,6 +34,9 @@ func (l managedRuleLoader) ActiveDefinitions(ctx context.Context, scope string) 
 	return l.repo.ActiveManagedDefinitions(ctx, scope)
 }
 
+// version is injected at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	logger := observability.Logger()
 	cfg, err := config.Load()
@@ -45,6 +48,8 @@ func main() {
 		logger.Error("invalid gateway configuration", slog.Any("error", err))
 		return
 	}
+	cfg.Version = version
+	logger.Info("starting gateway", slog.String("version", version))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	metrics := observability.NewMetrics()
