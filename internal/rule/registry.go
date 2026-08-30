@@ -2,6 +2,7 @@ package rule
 
 import (
 	"context"
+	"sort"
 	"sync"
 
 	"github.com/example/ai-audit-gateway/internal/audit"
@@ -67,9 +68,10 @@ func (r *Registry) Audit(ctx context.Context, tenant string, input audit.Input) 
 	return e.Audit(ctx, input), v
 }
 
-// EnsureTenant makes one best-effort database lookup for a tenant. A missing or
-// unavailable override leaves the global snapshot in effect without contaminating
-// another tenant's cache entry.
+// EnsureTenant makes one best-effort database lookup for a tenant. A missing
+// override leaves the global snapshot in effect without contaminating another
+// tenant's cache entry. A failed lookup leaves the tenant unresolved so the
+// next request retries instead of pinning the global snapshot forever.
 func (r *Registry) EnsureTenant(ctx context.Context, tenant string) {
 	r.mu.RLock()
 	_, done := r.resolved[tenant]
@@ -83,14 +85,27 @@ func (r *Registry) EnsureTenant(ctx context.Context, tenant string) {
 	if _, already := r.resolved[tenant]; already {
 		return
 	}
-	r.resolved[tenant] = struct{}{}
 	if err != nil {
 		return
 	}
-	engine, err := New(definitions)
-	if err == nil {
+	r.resolved[tenant] = struct{}{}
+	engine, compileErr := New(definitions)
+	if compileErr == nil {
 		r.tenants[tenant] = &tenantSnapshot{engine: engine, version: version}
 	}
+}
+
+// TenantScopes returns the tenant scopes already resolved on this instance so
+// periodic refresh can cover tenant snapshots, not only the global one.
+func (r *Registry) TenantScopes() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	scopes := make([]string, 0, len(r.resolved))
+	for tenant := range r.resolved {
+		scopes = append(scopes, "tenant:"+tenant)
+	}
+	sort.Strings(scopes)
+	return scopes
 }
 func (r *Registry) Refresh(ctx context.Context, scope string) error {
 	if r.repo == nil {

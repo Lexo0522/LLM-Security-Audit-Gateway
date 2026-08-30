@@ -277,6 +277,15 @@ func refreshSnapshots(ctx context.Context, interval time.Duration, registry *rul
 			} else {
 				metrics.Inc("audit_snapshot_refresh_total", map[string]string{"snapshot": "rules", "result": "success"})
 			}
+			// Tenant snapshots resolved on this instance must also converge
+			// after publish/rollback; a failed tenant refresh never flips the
+			// global readiness signal.
+			for _, scope := range registry.TenantScopes() {
+				if err := registry.Refresh(refreshCtx, scope); err != nil {
+					logger.Warn("tenant rule snapshot refresh failed", slog.String("scope", scope), slog.Any("error", err))
+					metrics.Inc("audit_snapshot_refresh_total", map[string]string{"snapshot": "rules", "result": "error"})
+				}
+			}
 			if err := policies.Refresh(refreshCtx); err != nil {
 				policies.MarkStale()
 				logger.Warn("policy snapshot refresh failed", slog.Any("error", err))
