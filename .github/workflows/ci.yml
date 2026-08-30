@@ -1,0 +1,69 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./...
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "unformatted files: $unformatted"
+            exit 1
+          fi
+      - name: go test -race
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+      # The advisory linters start non-blocking until their findings are
+      # triaged; flip these to blocking once the backlog is clean.
+      - name: golangci-lint
+        continue-on-error: true
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+      - name: gosec
+        continue-on-error: true
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -quiet ./...
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: smoke fuzz (30s per target)
+        run: |
+          go test -fuzz FuzzParse -fuzztime 30s ./internal/normalize
+          go test -fuzz FuzzExtractFragments -fuzztime 30s ./internal/stream
+          go test -fuzz FuzzScannerFeed -fuzztime 30s ./internal/stream
+          go test -fuzz FuzzEngineAudit -fuzztime 30s ./internal/rule
+
+  # Reuses the existing PowerShell integration script on PowerShell Core
+  # instead of keeping a second Bash copy of the same flow.
+  integration:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: run-compose integration tests
+        run: pwsh ./tests/integration/run-compose.ps1
