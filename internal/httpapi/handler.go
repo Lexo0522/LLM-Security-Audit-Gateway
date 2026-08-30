@@ -320,7 +320,11 @@ func identityUnavailable(c *fiber.Ctx) error {
 func copyResponseHeaders(c *fiber.Ctx, headers http.Header) {
 	for key, values := range headers {
 		switch http.CanonicalHeaderKey(key) {
-		case "Connection", "Content-Length", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade":
+		case "Connection", "Content-Length", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
+			// The gateway owns the client relationship; upstream cookies and
+			// CORS policy must not silently apply to gateway clients.
+			"Set-Cookie",
+			"Access-Control-Allow-Origin", "Access-Control-Allow-Credentials", "Access-Control-Allow-Headers", "Access-Control-Allow-Methods", "Access-Control-Expose-Headers", "Access-Control-Max-Age":
 			continue
 		}
 		c.Response().Header.Del(key)

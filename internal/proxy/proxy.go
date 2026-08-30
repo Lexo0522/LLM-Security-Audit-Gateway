@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	pathpkg "path"
 	"strings"
 	"time"
 
@@ -42,15 +43,20 @@ func (c *Client) Do(ctx context.Context, method, path, query string, body []byte
 	if err != nil {
 		return err
 	}
-	if query != "" {
-		parsed, parseErr := url.Parse(target)
-		if parseErr != nil {
-			return parseErr
-		}
-		parsed.RawQuery = query
-		target = parsed.String()
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
+	parsed.RawQuery = query
+	// Clean dot segments again (url.Parse does not) so neither a decoded
+	// traversal from the front framework nor an encoded one can normalize the
+	// target outside the /v1 boundary.
+	parsed.Path = pathpkg.Clean("/" + parsed.Path)
+	parsed.RawPath = ""
+	if !strings.HasPrefix(parsed.Path, "/v1/") {
+		return fmt.Errorf("upstream path %q escapes the /v1 boundary", path)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, parsed.String(), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -109,13 +115,21 @@ func (c *Client) Do(ctx context.Context, method, path, query string, body []byte
 	return err
 }
 
+// upstreamForwardHeaders is an allowlist of client headers the upstream may
+// see. Everything else — cookies, forwarding chains, caller identity, internal
+// hops — is stripped, and Authorization is always re-set from configuration.
+var upstreamForwardHeaders = map[string]struct{}{
+	"Accept":         {},
+	"Accept-Charset": {},
+	"Content-Type":   {},
+	"User-Agent":     {},
+	"X-Request-Id":   {},
+	"OpenAI-Beta":    {},
+}
+
 func copyHeaders(dst, src http.Header) {
 	for key, values := range src {
-		lower := strings.ToLower(key)
-		// Accept-Encoding is dropped so net/http negotiates a gzip encoding it
-		// will decode itself, keeping the audit path on plaintext. The body is
-		// forwarded in its decoded form, so Content-Encoding would lie about it.
-		if lower == "host" || lower == "content-length" || lower == "authorization" || lower == "x-tenant-id" || lower == "accept-encoding" || lower == "content-encoding" {
+		if _, ok := upstreamForwardHeaders[http.CanonicalHeaderKey(key)]; !ok {
 			continue
 		}
 		for _, value := range values {

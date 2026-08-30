@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/example/ai-audit-gateway/internal/config"
@@ -142,5 +143,49 @@ func TestQueryStringsAreForwardedUpstream(t *testing.T) {
 	}
 	if gotPath != "/v1/chat/completions" || gotQuery != "api-version=2024-01&user=alice" {
 		t.Fatalf("path=%q query=%q", gotPath, gotQuery)
+	}
+}
+
+func TestCopyHeadersForwardsOnlyAllowlistedHeaders(t *testing.T) {
+	source := http.Header{
+		"Cookie":            []string{"session=secret"},
+		"X-Forwarded-For":   []string{"10.0.0.1"},
+		"X-Internal-Secret": []string{"hunter2"},
+		"Content-Encoding":  []string{"gzip"},
+		"Content-Type":      []string{"application/json"},
+		"Accept":            []string{"application/json"},
+		"User-Agent":        []string{"client/1.0"},
+		"X-Request-Id":      []string{"request-a"},
+	}
+	destination := http.Header{}
+	copyHeaders(destination, source)
+	for key, want := range map[string]string{
+		"Cookie":            "",
+		"X-Forwarded-For":   "",
+		"X-Internal-Secret": "",
+		"Content-Encoding":  "",
+		"Content-Type":      "application/json",
+		"Accept":            "application/json",
+		"User-Agent":        "client/1.0",
+		"X-Request-Id":      "request-a",
+	} {
+		if got := destination.Get(key); got != want {
+			t.Fatalf("header %s=%q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestPathTraversalCannotEscapeV1Boundary(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.URL.Path))
+	}))
+	defer upstream.Close()
+	client := New(config.Config{UpstreamURL: upstream.URL, RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
+	for _, path := range []string{"/v1/%2e%2e/admin", "/v1/../admin"} {
+		var destination bytes.Buffer
+		err := client.Do(context.Background(), http.MethodPost, path, "", nil, nil, &destination, nil, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "escapes the /v1 boundary") {
+			t.Fatalf("path %q must be rejected, got %v", path, err)
+		}
 	}
 }
