@@ -67,17 +67,21 @@ type Event struct {
 
 // RedactEvidence removes evidence before an event crosses a persistence or
 // message boundary. It deliberately retains hashes, scores, rule/policy
-// versions, and decision metadata needed for operations.
+// versions, and decision metadata needed for operations. Model-auditor evidence
+// can quote user content, so it is dropped for every decision — a blocked
+// verdict must not turn the audit trail into a copy of the payload. Rule
+// matches carry rule patterns rather than matched text and survive unless the
+// decision itself is redact.
 func RedactEvidence(event Event) Event {
-	if event.Decision != "redact" {
-		return event
-	}
-	event.Matches = nil
-	if event.Auditor != nil {
+	if event.Auditor != nil && event.Auditor.Evidence != "" {
 		copy := *event.Auditor
 		copy.Evidence = ""
 		event.Auditor = &copy
 	}
+	if event.Decision != "redact" {
+		return event
+	}
+	event.Matches = nil
 	metadata := make(map[string]string, len(event.Metadata)+1)
 	for key, value := range event.Metadata {
 		metadata[key] = value

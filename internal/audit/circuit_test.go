@@ -55,3 +55,17 @@ func TestCircuitDoesNotOpenOnClientCancellation(t *testing.T) {
 		t.Fatal("cancellations must not open the circuit")
 	}
 }
+
+func TestRedactEvidenceDropsModelEvidenceForEveryDecision(t *testing.T) {
+	event := Event{Decision: "block", Matches: []Match{{RuleID: "r1", Evidence: "pattern-only"}}, Auditor: &ModelResult{Verdict: "block", Score: 90, Evidence: "user content quoted back"}}
+	redacted := RedactEvidence(event)
+	if redacted.Auditor.Evidence != "" || redacted.Auditor.Verdict != "block" || redacted.Auditor.Score != 90 {
+		t.Fatalf("model evidence must be dropped for block decisions: %+v", redacted.Auditor)
+	}
+	if len(redacted.Matches) != 1 || redacted.Matches[0].Evidence != "pattern-only" {
+		t.Fatalf("rule match patterns must survive non-redact decisions: %+v", redacted.Matches)
+	}
+	if event.Auditor.Evidence == "" {
+		t.Fatal("caller copy must stay untouched")
+	}
+}
