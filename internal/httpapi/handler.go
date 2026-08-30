@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/andybalholm/brotli"
@@ -46,6 +47,41 @@ type Handler struct {
 	metrics       *observability.Metrics
 	readiness     *health.Manager
 	authThrottle  *authThrottle
+	shadowOnce    sync.Once
+	shadowJobs    chan shadowJob
+}
+
+type shadowJob struct {
+	input       audit.Input
+	result      audit.Result
+	ruleVersion string
+	configured  policy.Policy
+	body        []byte
+}
+
+const shadowQueueSize = 256
+
+// submitShadow queues a best-effort shadow audit. The queue bounds the work in
+// flight; when it is full the job is dropped and counted instead of growing
+// without limit.
+func (h *Handler) submitShadow(job shadowJob) {
+	h.shadowOnce.Do(func() {
+		h.shadowJobs = make(chan shadowJob, shadowQueueSize)
+		for range 2 {
+			go h.shadowWorker()
+		}
+	})
+	select {
+	case h.shadowJobs <- job:
+	default:
+		h.metrics.Inc("audit_shadow_dropped_total", nil)
+	}
+}
+
+func (h *Handler) shadowWorker() {
+	for job := range h.shadowJobs {
+		h.shadow(job.input, job.result, job.ruleVersion, job.configured, job.body)
+	}
 }
 
 func (h *Handler) SetReadiness(readiness *health.Manager) { h.readiness = readiness }
@@ -196,7 +232,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		}
 		h.emit(input, result, ruleVersion, configured, decision, modelResult, auditorErr, started, auditBody)
 		if decision == policy.Allow && h.cfg.AuditorURL != "" {
-			go h.shadow(input, result, ruleVersion, configured, auditBody)
+			h.submitShadow(shadowJob{input: input, result: result, ruleVersion: ruleVersion, configured: configured, body: auditBody})
 		}
 	}
 	streamWindows := stream.NewWindows(h.cfg.SSEAuditWindowBytes)
@@ -233,7 +269,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 			}
 			h.emitMetadata(responseInput, responseResult, responseVersion, responsePolicy, responseDecision, nil, "", time.Now(), fragment.Text, metadata)
 			if responseDecision == policy.Allow && h.cfg.AuditorURL != "" {
-				go h.shadow(responseInput, responseResult, responseVersion, responsePolicy, fragment.Text)
+				h.submitShadow(shadowJob{input: responseInput, result: responseResult, ruleVersion: responseVersion, configured: responsePolicy, body: fragment.Text})
 			}
 		}
 		return true
@@ -251,7 +287,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		h.metrics.Inc("audit_rule_decisions_total", map[string]string{"decision": string(responseDecision), "direction": "response"})
 		h.emit(responseInput, responseResult, responseVersion, responsePolicy, responseDecision, nil, "", time.Now(), chunk)
 		if responseDecision == policy.Allow && h.cfg.AuditorURL != "" {
-			go h.shadow(responseInput, responseResult, responseVersion, responsePolicy, chunk)
+			h.submitShadow(shadowJob{input: responseInput, result: responseResult, ruleVersion: responseVersion, configured: responsePolicy, body: chunk})
 		}
 		return responseDecision != policy.Block
 	}
