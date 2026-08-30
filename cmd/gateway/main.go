@@ -54,7 +54,7 @@ func main() {
 	defer stop()
 	metrics := observability.NewMetrics()
 	repo, err := storage.Open(ctx, cfg.PostgresURL, storage.PoolSettings{
-		MaxConns:        int32(cfg.PostgresPoolMaxConns),
+		MaxConns:        int32(min(cfg.PostgresPoolMaxConns, 1024)), // #nosec G115 -- capped below int32 range
 		MaxConnLifetime: time.Duration(cfg.PostgresConnMaxLifetimeMS) * time.Millisecond,
 		MaxConnIdleTime: time.Duration(cfg.PostgresConnMaxIdleMS) * time.Millisecond,
 	})

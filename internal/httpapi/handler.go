@@ -202,7 +202,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		result      audit.Result
 		ruleVersion string
 		configured  policy.Policy
-		decision    = policy.Allow
+		decision    policy.Decision
 	)
 	var modelResult *audit.ModelResult
 	var auditorErr string

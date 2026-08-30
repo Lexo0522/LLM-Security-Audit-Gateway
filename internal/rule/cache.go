@@ -89,7 +89,7 @@ func (c *CacheLoader) Subscribe(ctx context.Context, refresh func(string)) {
 				if !ok {
 					return
 				}
-				_ = c.client.Del(context.Background(), "audit-gateway:rules:"+message.Payload).Err()
+				_ = c.client.Del(ctx, "audit-gateway:rules:"+message.Payload).Err()
 				refresh(message.Payload)
 			}
 		}

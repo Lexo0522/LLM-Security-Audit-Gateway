@@ -148,7 +148,7 @@ func (s *Store) InsertEvents(ctx context.Context, events []audit.Event) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// clickhouse-go/v2's database/sql batch contract is
 	// Begin -> Prepare(INSERT) -> Exec(rows) -> Commit.
 	// Ref: https://github.com/ClickHouse/clickhouse-go/blob/v2.38.1/examples/std/batch.go
@@ -168,7 +168,8 @@ func (s *Store) InsertEvents(ctx context.Context, events []audit.Event) error {
 		if event.Auditor != nil {
 			auditor, _ = json.Marshal(event.Auditor)
 		}
-		if _, err = statement.ExecContext(ctx, event.EventID, event.EventTime.UTC(), event.RequestID, event.TenantID, event.APIKeyID, string(event.Direction), event.Path, event.Model, event.Decision, event.RiskScore, event.RuleVersion, event.PolicyID, event.PolicyRevision, string(matches), string(auditor), event.AuditorError, event.LatencyMS, uint64(event.BodyBytes), event.ContentSHA256, string(metadata), event.SchemaVersion, time.Now().UTC()); err != nil {
+		bodyBytes := uint64(event.BodyBytes) // #nosec G115 -- validated non-negative by ValidateEvent above
+		if _, err = statement.ExecContext(ctx, event.EventID, event.EventTime.UTC(), event.RequestID, event.TenantID, event.APIKeyID, string(event.Direction), event.Path, event.Model, event.Decision, event.RiskScore, event.RuleVersion, event.PolicyID, event.PolicyRevision, string(matches), string(auditor), event.AuditorError, event.LatencyMS, bodyBytes, event.ContentSHA256, string(metadata), event.SchemaVersion, time.Now().UTC()); err != nil {
 			return err
 		}
 	}
@@ -323,7 +324,7 @@ func (s *Store) ListEvents(ctx context.Context, filter EventFilter) (EventPage, 
 		return EventPage{}, err
 	}
 	args = append(args, filter.Limit+1)
-	rows, err := s.db.QueryContext(ctx, "SELECT "+eventColumns+" FROM ("+
+	rows, err := s.db.QueryContext(ctx, "SELECT "+eventColumns+" FROM ("+ // #nosec G202 -- clause list is server-controlled; user values are bound via args
 		"SELECT "+eventColumns+" FROM audit_events WHERE "+condition+
 		" ORDER BY event_time DESC, event_id DESC LIMIT 1 BY tenant_id, event_time, event_id LIMIT ?"+
 		") ORDER BY event_time DESC, event_id DESC", args...)
@@ -381,7 +382,7 @@ func (s *Store) Summary(ctx context.Context, filter EventFilter, bucket string) 
 		column string
 		into   map[string]int64
 	}{{"decision", result.ByDecision}, {"direction", result.ByDirection}, {"model", result.ByModel}, {"path", result.ByPath}} {
-		rows, queryErr := s.db.QueryContext(ctx, "SELECT "+aggregate.column+", count() FROM ("+dedupSource(condition)+") GROUP BY "+aggregate.column, args...)
+		rows, queryErr := s.db.QueryContext(ctx, "SELECT "+aggregate.column+", count() FROM ("+dedupSource(condition)+") GROUP BY "+aggregate.column, args...) // #nosec G202 -- clause list is server-controlled; user values are bound via args
 		if queryErr != nil {
 			return Summary{}, queryErr
 		}
@@ -389,18 +390,18 @@ func (s *Store) Summary(ctx context.Context, filter EventFilter, bucket string) 
 			var key string
 			var count int64
 			if queryErr = rows.Scan(&key, &count); queryErr != nil {
-				rows.Close()
+				_ = rows.Close()
 				return Summary{}, queryErr
 			}
 			aggregate.into[key] = count
 		}
 		if queryErr = rows.Err(); queryErr != nil {
-			rows.Close()
+			_ = rows.Close()
 			return Summary{}, queryErr
 		}
-		rows.Close()
+		_ = rows.Close()
 	}
-	ruleRows, err := s.db.QueryContext(ctx, "SELECT rule_id, count() FROM (SELECT JSONExtractString(arrayJoin(JSONExtractArrayRaw(matches)), 'rule_id') AS rule_id FROM ("+dedupSource(condition)+")) WHERE rule_id != '' GROUP BY rule_id", args...)
+	ruleRows, err := s.db.QueryContext(ctx, "SELECT rule_id, count() FROM (SELECT JSONExtractString(arrayJoin(JSONExtractArrayRaw(matches)), 'rule_id') AS rule_id FROM ("+dedupSource(condition)+")) WHERE rule_id != '' GROUP BY rule_id", args...) // #nosec G202 -- clause list is server-controlled; user values are bound via args
 	if err != nil {
 		return Summary{}, err
 	}
@@ -408,21 +409,21 @@ func (s *Store) Summary(ctx context.Context, filter EventFilter, bucket string) 
 		var ruleID string
 		var count int64
 		if err = ruleRows.Scan(&ruleID, &count); err != nil {
-			ruleRows.Close()
+			_ = ruleRows.Close()
 			return Summary{}, err
 		}
 		result.ByRule[ruleID] = count
 	}
 	if err = ruleRows.Err(); err != nil {
-		ruleRows.Close()
+		_ = ruleRows.Close()
 		return Summary{}, err
 	}
-	ruleRows.Close()
+	_ = ruleRows.Close()
 	function := "toStartOfHour"
 	if bucket == "day" {
 		function = "toStartOfDay"
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+function+"(event_time), count(), avgOrNull(risk_score), max(risk_score) FROM ("+dedupSource(condition)+") GROUP BY 1 ORDER BY 1", args...)
+	rows, err := s.db.QueryContext(ctx, "SELECT "+function+"(event_time), count(), avgOrNull(risk_score), max(risk_score) FROM ("+dedupSource(condition)+") GROUP BY 1 ORDER BY 1", args...) // #nosec G202 -- clause list is server-controlled; user values are bound via args
 	if err != nil {
 		return Summary{}, err
 	}

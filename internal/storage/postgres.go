@@ -223,7 +223,7 @@ func (r *Repository) Publish(ctx context.Context, version string) (RuleSet, erro
 	if err != nil {
 		return RuleSet{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err = tx.Exec(ctx, `UPDATE rule_sets SET status='archived' WHERE scope=$1 AND status='published'`, set.Scope); err != nil {
 		return RuleSet{}, err
 	}
@@ -325,7 +325,7 @@ func (r *Repository) SeedManagedConfiguration(ctx context.Context, definitions [
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM rule_sets WHERE scope='global' AND status='published' AND source='managed') OR EXISTS(SELECT 1 FROM policies WHERE scope='global')`).Scan(&exists); err != nil {
 		return err
@@ -478,7 +478,7 @@ func (r *Repository) StoreEvents(ctx context.Context, events []audit.Event) erro
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	// Both statements per event are pipelined through one batch instead of
 	// paying a round trip per statement.
 	batch := &pgx.Batch{}

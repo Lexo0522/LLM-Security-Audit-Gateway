@@ -177,8 +177,6 @@ func ExtractFragments(data []byte) []Fragment {
 		choiceIndex := choicePosition
 		if choice.Index != nil {
 			choiceIndex = *choice.Index
-		} else {
-			choiceIndex = choicePosition
 		}
 		if choice.Delta.Content != "" {
 			fragments = append(fragments, Fragment{Channel: "chat:choice:" + strconv.Itoa(choiceIndex) + ":content", Text: []byte(choice.Delta.Content)})
@@ -190,8 +188,6 @@ func ExtractFragments(data []byte) []Fragment {
 			toolIndex := toolPosition
 			if toolCall.Index != nil {
 				toolIndex = *toolCall.Index
-			} else {
-				toolIndex = toolPosition
 			}
 			if toolCall.Function.Arguments != "" {
 				fragments = append(fragments, Fragment{Channel: "chat:choice:" + strconv.Itoa(choiceIndex) + ":tool:" + strconv.Itoa(toolIndex) + ":arguments", Text: []byte(toolCall.Function.Arguments)})

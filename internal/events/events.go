@@ -181,13 +181,11 @@ func (p *Pipeline) run() {
 	defer flushTimer.Stop()
 	for {
 		if len(batch) == 0 {
-			select {
-			case event, ok := <-p.ch:
-				if !ok {
-					return
-				}
-				batch = append(batch, event)
+			event, ok := <-p.ch
+			if !ok {
+				return
 			}
+			batch = append(batch, event)
 		}
 		for len(batch) < cap(batch) {
 			select {
