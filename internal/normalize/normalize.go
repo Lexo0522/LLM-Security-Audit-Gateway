@@ -2,8 +2,10 @@ package normalize
 
 import (
 	"encoding/json"
-	"golang.org/x/text/unicode/norm"
+	"sort"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 func Text(body []byte) string {
@@ -25,8 +27,15 @@ func collect(value any, parts *[]string) {
 			collect(child, parts)
 		}
 	case map[string]any:
-		for _, child := range item {
-			collect(child, parts)
+		// Map iteration order is randomized in Go; sorting the keys keeps the
+		// normalized text reproducible so rule matches are deterministic.
+		keys := make([]string, 0, len(item))
+		for key := range item {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			collect(item[key], parts)
 		}
 	}
 }
