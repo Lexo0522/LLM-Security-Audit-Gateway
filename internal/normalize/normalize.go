@@ -9,26 +9,30 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// Parse returns the normalized text and the top-level "model" field from a
-// JSON body in a single pass, so callers do not parse the body twice. Non-JSON
-// bodies are normalized as plain text and yield an empty model.
-func Parse(body []byte) (text string, model string) {
+// Parse returns the normalized text, the top-level "model" field, and whether
+// the body asks for a streaming response ("stream": true), all in one pass so
+// callers do not parse the body twice. Non-JSON bodies are normalized as plain
+// text and yield empty model/stream.
+func Parse(body []byte) (text string, model string, stream bool) {
 	var payload any
 	if json.Unmarshal(body, &payload) == nil {
 		if object, ok := payload.(map[string]any); ok {
 			if value, ok := object["model"].(string); ok {
 				model = value
 			}
+			if value, ok := object["stream"].(bool); ok {
+				stream = value
+			}
 		}
 		var walker walker
 		walker.collect(payload)
-		return normalize(strings.Join(walker.parts, "\n")), model
+		return normalize(strings.Join(walker.parts, "\n")), model, stream
 	}
-	return normalize(string(body)), ""
+	return normalize(string(body)), "", false
 }
 
 func Text(body []byte) string {
-	text, _ := Parse(body)
+	text, _, _ := Parse(body)
 	return text
 }
 

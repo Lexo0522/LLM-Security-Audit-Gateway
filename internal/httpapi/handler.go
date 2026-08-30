@@ -113,7 +113,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 	if h.identities == nil {
 		return identityUnavailable(c)
 	}
-	requestContext := c.UserContext()
+	requestContext := c.Context()
 	// Failed gateway key lookups hit PostgreSQL, so repeated invalid keys are
 	// throttled per client address before they can be replayed.
 	if h.authThrottle.blocked(c.IP()) {
@@ -154,7 +154,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 	if decodeErr != nil {
 		return encodingError(c, decodeErr)
 	}
-	normalizedText, model := normalize.Parse(auditBody)
+	normalizedText, model, streamRequested := normalize.Parse(auditBody)
 	input := audit.Input{RequestID: requestID, TenantID: identity.TenantID, APIKeyID: identity.APIKeyID, Direction: audit.DirectionRequest, Path: c.Path(), Model: model, Text: normalizedText}
 	started := time.Now()
 	var (
@@ -201,8 +201,16 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 	}
 	streamWindows := stream.NewWindows(h.cfg.SSEAuditWindowBytes)
 	streamContext, cancelStream := context.WithCancel(requestContext)
-	defer cancelStream()
 	terminationCode := ""
+
+	// Everything the streaming goroutine touches is captured up front: the
+	// fiber request context is recycled once the response completes and must
+	// not be read concurrently with the response write.
+	pathValue := string(c.Path())
+	methodValue := c.Method()
+	reqHeaders := c.GetReqHeaders()
+	queryString := string(c.Request().URI().QueryString())
+
 	inspect := func(event stream.Event) bool {
 		if !h.cfg.AuditEnabled {
 			return true
@@ -212,11 +220,11 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 			responseInput.Direction = audit.DirectionResponse
 			responseInput.Text = normalize.Text(streamWindows.Feed(fragment.Channel, fragment.Text))
 			responseResult, responseVersion := h.rules.Audit(streamContext, identity.TenantID, responseInput)
-			responsePolicy := h.policies.Resolve(identity.TenantID, c.Path(), "response")
+			responsePolicy := h.policies.Resolve(identity.TenantID, pathValue, "response")
 			responseDecision := policy.Elevate(responseResult, policy.Decide(responseResult, responsePolicy))
 			h.metrics.Inc("audit_rule_decisions_total", map[string]string{"decision": string(responseDecision), "direction": "response"})
 			metadata := map[string]string{"sse": "true", "sse_channel": fragment.Channel}
-			if h.cfg.AuditEnabled && responseDecision == policy.Block {
+			if responseDecision == policy.Block {
 				terminationCode = "stream_policy_blocked"
 				metadata["stream_termination_reason"] = terminationCode
 				h.emitMetadata(responseInput, responseResult, responseVersion, responsePolicy, responseDecision, nil, "", time.Now(), fragment.Text, metadata)
@@ -224,7 +232,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 				return false
 			}
 			h.emitMetadata(responseInput, responseResult, responseVersion, responsePolicy, responseDecision, nil, "", time.Now(), fragment.Text, metadata)
-			if h.cfg.AuditEnabled && responseDecision == policy.Allow && h.cfg.AuditorURL != "" {
+			if responseDecision == policy.Allow && h.cfg.AuditorURL != "" {
 				go h.shadow(responseInput, responseResult, responseVersion, responsePolicy, fragment.Text)
 			}
 		}
@@ -237,24 +245,48 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		responseInput := input
 		responseInput.Direction = audit.DirectionResponse
 		responseInput.Text = normalize.Text(chunk)
-		responseResult, responseVersion := h.rules.Audit(context.Background(), identity.TenantID, responseInput)
-		responsePolicy := h.policies.Resolve(identity.TenantID, c.Path(), "response")
+		responseResult, responseVersion := h.rules.Audit(streamContext, identity.TenantID, responseInput)
+		responsePolicy := h.policies.Resolve(identity.TenantID, pathValue, "response")
 		responseDecision := policy.Elevate(responseResult, policy.Decide(responseResult, responsePolicy))
 		h.metrics.Inc("audit_rule_decisions_total", map[string]string{"decision": string(responseDecision), "direction": "response"})
 		h.emit(responseInput, responseResult, responseVersion, responsePolicy, responseDecision, nil, "", time.Now(), chunk)
-		if h.cfg.AuditEnabled && responseDecision == policy.Allow && h.cfg.AuditorURL != "" {
+		if responseDecision == policy.Allow && h.cfg.AuditorURL != "" {
 			go h.shadow(responseInput, responseResult, responseVersion, responsePolicy, chunk)
 		}
-		return !h.cfg.AuditEnabled || responseDecision != policy.Block
+		return responseDecision != policy.Block
 	}
-	err = h.upstream.Do(streamContext, c.Method(), c.Path(), string(c.Request().URI().QueryString()), auditBody, c.GetReqHeaders(), c.Response().BodyWriter(), func(status int, headers http.Header) {
-		copyResponseHeaders(c, headers)
-		c.Status(status)
-	}, inspectNonStream, inspect)
-	var inspectionBlocked *proxy.InspectionBlockedError
-	if errors.As(err, &inspectionBlocked) {
-		if inspectionBlocked.ResponseStarted {
-			cancelStream()
+
+	// Non-streaming exchanges get the overall request timeout; requests that
+	// ask for streaming are exempt so long-lived SSE sessions survive.
+	upstreamCtx := streamContext
+	if !streamRequested && h.cfg.RequestTimeoutMS > 0 {
+		var cancelTimeout context.CancelFunc
+		upstreamCtx, cancelTimeout = context.WithTimeout(streamContext, time.Duration(h.cfg.RequestTimeoutMS)*time.Millisecond)
+		defer cancelTimeout()
+	}
+
+	// The upstream exchange streams through a pipe so each approved SSE event
+	// reaches the network as it is inspected instead of accumulating in memory.
+	// The handler waits only for the upstream response headers, registers them
+	// on the response, and hands the pipe to fasthttp.
+	type headerResult struct {
+		status  int
+		headers http.Header
+		err     error
+	}
+	headerCh := make(chan headerResult, 1)
+	bodyReader, bodyWriter := io.Pipe()
+	go func() {
+		defer cancelStream()
+		defer bodyWriter.Close()
+		err := h.upstream.Do(upstreamCtx, methodValue, pathValue, queryString, auditBody, reqHeaders, bodyWriter, func(status int, headers http.Header) {
+			headerCh <- headerResult{status: status, headers: headers}
+		}, inspectNonStream, inspect)
+		if err == nil {
+			return
+		}
+		var inspectionBlocked *proxy.InspectionBlockedError
+		if errors.As(err, &inspectionBlocked) && inspectionBlocked.ResponseStarted {
 			code := inspectionBlocked.Code
 			if code == "" {
 				code = terminationCode
@@ -265,16 +297,37 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 			if code == "sse_event_too_large" && h.cfg.AuditEnabled {
 				responseInput := input
 				responseInput.Direction = audit.DirectionResponse
-				responsePolicy := h.policies.Resolve(identity.TenantID, c.Path(), "response")
+				responsePolicy := h.policies.Resolve(identity.TenantID, pathValue, "response")
 				h.emitMetadata(responseInput, audit.Result{}, ruleVersion, responsePolicy, policy.Block, nil, "", time.Now(), nil, map[string]string{"sse": "true", "stream_termination_reason": code})
 			}
-			_, _ = c.Response().BodyWriter().Write(stream.SecurityTermination(code, requestID))
-			stream.Flush(c.Response().BodyWriter())
-			return nil
+			_, _ = bodyWriter.Write(stream.SecurityTermination(code, requestID))
+			return
 		}
-		return blocked(c, "response_policy_blocked", "response blocked by audit policy")
+		headerCh <- headerResult{err: err}
+	}()
+	var headerTimeout <-chan time.Time
+	if h.cfg.RequestTimeoutMS > 0 {
+		headerTimeout = time.After(time.Duration(h.cfg.RequestTimeoutMS) * time.Millisecond)
 	}
-	return err
+	select {
+	case result := <-headerCh:
+		if result.err != nil {
+			var inspectionBlocked *proxy.InspectionBlockedError
+			if errors.As(result.err, &inspectionBlocked) {
+				cancelStream()
+				return blocked(c, "response_policy_blocked", "response blocked by audit policy")
+			}
+			cancelStream()
+			return fiber.NewError(fiber.StatusBadGateway, "upstream request failed")
+		}
+		copyResponseHeaders(c, result.headers)
+		c.Status(result.status)
+	case <-headerTimeout:
+		cancelStream()
+		return fiber.NewError(fiber.StatusGatewayTimeout, "upstream response headers timed out")
+	}
+	c.Response().SetBodyStream(bodyReader, -1)
+	return nil
 }
 
 func (h *Handler) shadow(input audit.Input, result audit.Result, ruleVersion string, configured policy.Policy, body []byte) {

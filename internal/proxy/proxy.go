@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	pathpkg "path"
@@ -32,7 +33,24 @@ type Client struct {
 }
 
 func New(cfg config.Config) *Client {
-	return &Client{cfg: cfg, http: &http.Client{Timeout: time.Duration(cfg.RequestTimeoutMS) * time.Millisecond}}
+	// A dedicated transport with per-phase budgets: connection churn is avoided
+	// by a large idle pool, stalls before first response byte are capped by
+	// ResponseHeaderTimeout, and no overall Client.Timeout is set because it
+	// would kill long-lived SSE responses mid-stream. Non-streaming requests
+	// get an overall timeout from the handler.
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   64,
+		MaxConnsPerHost:       256,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		ResponseHeaderTimeout: time.Duration(cfg.RequestTimeoutMS) * time.Millisecond,
+	}
+	return &Client{cfg: cfg, http: &http.Client{Transport: transport}}
 }
 
 // Do forwards a request to the configured upstream. Non-SSE responses are
