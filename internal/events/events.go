@@ -23,6 +23,17 @@ type Publisher interface {
 	Close() error
 }
 
+// Source provides transactional-outbox rows awaiting Kafka delivery. It is an
+// interface (satisfied by *storage.Repository) so dispatcher behavior is
+// unit-testable without PostgreSQL.
+type Source interface {
+	ClaimOutbox(ctx context.Context, limit int, lease time.Duration) ([]storage.OutboxRecord, error)
+	RetryOutbox(ctx context.Context, eventID string, attempts int, cause error) error
+	MarkOutboxPublished(ctx context.Context, eventID string) error
+	OutboxPending(ctx context.Context) (int64, error)
+	OutboxPoison(ctx context.Context, maxAttempts int) (int64, error)
+}
+
 type KafkaPublisher struct {
 	writer  *kafka.Writer
 	brokers []string
@@ -256,7 +267,7 @@ func (p *Pipeline) updateMetrics() {
 
 // Dispatcher provides at-least-once Kafka delivery from PostgreSQL's outbox.
 type Dispatcher struct {
-	source    *storage.Repository
+	source    Source
 	publisher Publisher
 	logger    *slog.Logger
 	metrics   *observability.Metrics
@@ -264,8 +275,8 @@ type Dispatcher struct {
 	cancel    context.CancelFunc
 }
 
-func NewDispatcher(source *storage.Repository, publisher Publisher, logger *slog.Logger, metrics *observability.Metrics) *Dispatcher {
-	if publisher == nil {
+func NewDispatcher(source Source, publisher Publisher, logger *slog.Logger, metrics *observability.Metrics) *Dispatcher {
+	if source == nil || publisher == nil {
 		return nil
 	}
 	if logger == nil {
@@ -314,7 +325,10 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 	}
 	for _, record := range records {
 		var event audit.Event
-		if err := json.Unmarshal(record.Payload, &event); err == nil {
+		// A payload that fails to decode must re-enter the retry path; falling
+		// through to MarkOutboxPublished here would silently drop the event.
+		err := json.Unmarshal(record.Payload, &event)
+		if err == nil {
 			err = d.publisher.Publish(ctx, event)
 		}
 		if err != nil {
@@ -331,6 +345,10 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 	if pending, err := d.source.OutboxPending(ctx); err == nil {
 		d.metrics.Set("audit_outbox_pending", float64(pending), nil)
 	}
+	if poison, err := d.source.OutboxPoison(ctx, storage.MaxOutboxAttempts); err == nil {
+		d.metrics.Set("audit_outbox_poison", float64(poison), nil)
+	}
 }
 
 var _ Sink = (*storage.Repository)(nil)
+var _ Source = (*storage.Repository)(nil)

@@ -21,6 +21,11 @@ groups:
         for: 10m
         labels: { severity: warning }
         annotations: { summary: "Kafka audit outbox backlog is growing" }
+      - alert: AuditOutboxPoison
+        expr: audit_outbox_poison > 0
+        for: 15m
+        labels: { severity: critical }
+        annotations: { summary: "Audit outbox contains poison events that exceed the delivery retry cap" }
       - alert: AuditRedisLocalFallback
         expr: audit_redis_limiter_degraded == 1
         for: 5m

@@ -473,6 +473,11 @@ func (r *Repository) StoreEvents(ctx context.Context, events []audit.Event) erro
 	}
 	return tx.Commit(ctx)
 }
+// MaxOutboxAttempts bounds delivery retries. ClaimOutbox never hands out rows
+// at or above this count; they stay visible through OutboxPoison for alerting
+// instead of blocking the dispatch queue forever.
+const MaxOutboxAttempts = 12
+
 func (r *Repository) ClaimOutbox(ctx context.Context, limit int, lease time.Duration) ([]OutboxRecord, error) {
 	if r == nil {
 		return nil, fmt.Errorf("postgres disabled")
@@ -483,7 +488,7 @@ func (r *Repository) ClaimOutbox(ctx context.Context, limit int, lease time.Dura
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
-	rows, err := r.pool.Query(ctx, `WITH candidate AS (SELECT event_id FROM audit_outbox WHERE published_at IS NULL AND available_at <= now() AND (lease_until IS NULL OR lease_until < now()) ORDER BY created_at LIMIT $1 FOR UPDATE SKIP LOCKED) UPDATE audit_outbox o SET lease_until=now()+$2::interval, attempts=o.attempts+1 FROM candidate WHERE o.event_id=candidate.event_id RETURNING o.event_id,o.tenant_id,o.payload,o.attempts,o.created_at`, limit, lease.String())
+	rows, err := r.pool.Query(ctx, `WITH candidate AS (SELECT event_id FROM audit_outbox WHERE published_at IS NULL AND attempts < $3 AND available_at <= now() AND (lease_until IS NULL OR lease_until < now()) ORDER BY created_at LIMIT $1 FOR UPDATE SKIP LOCKED) UPDATE audit_outbox o SET lease_until=now()+$2::interval, attempts=o.attempts+1 FROM candidate WHERE o.event_id=candidate.event_id RETURNING o.event_id,o.tenant_id,o.payload,o.attempts,o.created_at`, limit, lease.String(), MaxOutboxAttempts)
 	if err != nil {
 		return nil, err
 	}
@@ -513,6 +518,11 @@ func (r *Repository) RetryOutbox(ctx context.Context, eventID string, attempts i
 func (r *Repository) OutboxPending(ctx context.Context) (int64, error) {
 	var count int64
 	err := r.pool.QueryRow(ctx, `SELECT count(*) FROM audit_outbox WHERE published_at IS NULL`).Scan(&count)
+	return count, err
+}
+func (r *Repository) OutboxPoison(ctx context.Context, maxAttempts int) (int64, error) {
+	var count int64
+	err := r.pool.QueryRow(ctx, `SELECT count(*) FROM audit_outbox WHERE published_at IS NULL AND attempts >= $1`, maxAttempts).Scan(&count)
 	return count, err
 }
 func truncateError(err error) string {
