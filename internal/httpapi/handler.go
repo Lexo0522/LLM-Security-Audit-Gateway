@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -150,11 +149,13 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 	c.Set("X-Request-ID", requestID)
 	// The plaintext copy is what rules and the model auditor see and what is
 	// forwarded upstream; wire-level encodings must never reach them encoded.
+	// One JSON pass produces both the normalized text and the model field.
 	auditBody, decodeErr := decodeAuditedBody(c.Request().Body(), c.Get(fiber.HeaderContentEncoding))
 	if decodeErr != nil {
 		return encodingError(c, decodeErr)
 	}
-	input := audit.Input{RequestID: requestID, TenantID: identity.TenantID, APIKeyID: identity.APIKeyID, Direction: audit.DirectionRequest, Path: c.Path(), Model: requestModel(auditBody), Text: normalize.Text(auditBody)}
+	normalizedText, model := normalize.Parse(auditBody)
+	input := audit.Input{RequestID: requestID, TenantID: identity.TenantID, APIKeyID: identity.APIKeyID, Direction: audit.DirectionRequest, Path: c.Path(), Model: model, Text: normalizedText}
 	started := time.Now()
 	var (
 		result      audit.Result
@@ -333,19 +334,16 @@ func copyResponseHeaders(c *fiber.Ctx, headers http.Header) {
 		}
 	}
 }
-func requestModel(body []byte) string {
-	var value struct {
-		Model string `json:"model"`
-	}
-	_ = json.Unmarshal(body, &value)
-	return value.Model
-}
-
-const maxDecodedBodyBytes = 64 << 20
 
 var errUnsupportedEncoding = errors.New("unsupported content encoding")
 var errMalformedEncoding = errors.New("malformed compressed request body")
 var errDecodedBodyTooLarge = errors.New("decoded request body exceeds audit limit")
+
+const maxDecodedBodyBytes = 64 << 20
+
+func tooLarge(c *fiber.Ctx, message string) error {
+	return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{"error": fiber.Map{"message": message, "type": "request_too_large", "code": "request_too_large"}})
+}
 
 // decodeAuditedBody returns the plaintext form of a request body so rule and
 // model audit run on readable content. The plaintext result is also what gets
@@ -399,9 +397,6 @@ func encodingError(c *fiber.Ctx, err error) error {
 	}
 }
 
-func tooLarge(c *fiber.Ctx, message string) error {
-	return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{"error": fiber.Map{"message": message, "type": "request_too_large", "code": "request_too_large"}})
-}
 func max(a, b int) int {
 	if a > b {
 		return a

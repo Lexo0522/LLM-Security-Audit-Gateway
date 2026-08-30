@@ -9,23 +9,38 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-func Text(body []byte) string {
+// Parse returns the normalized text and the top-level "model" field from a
+// JSON body in a single pass, so callers do not parse the body twice. Non-JSON
+// bodies are normalized as plain text and yield an empty model.
+func Parse(body []byte) (text string, model string) {
 	var payload any
 	if json.Unmarshal(body, &payload) == nil {
-		var parts []string
-		collect(payload, &parts)
-		return normalize(strings.Join(parts, "\n"))
+		if object, ok := payload.(map[string]any); ok {
+			if value, ok := object["model"].(string); ok {
+				model = value
+			}
+		}
+		var walker walker
+		walker.collect(payload)
+		return normalize(strings.Join(walker.parts, "\n")), model
 	}
-	return normalize(string(body))
+	return normalize(string(body)), ""
 }
 
-func collect(value any, parts *[]string) {
+func Text(body []byte) string {
+	text, _ := Parse(body)
+	return text
+}
+
+type walker struct{ parts []string }
+
+func (w *walker) collect(value any) {
 	switch item := value.(type) {
 	case string:
-		*parts = append(*parts, item)
+		w.parts = append(w.parts, item)
 	case []any:
 		for _, child := range item {
-			collect(child, parts)
+			w.collect(child)
 		}
 	case map[string]any:
 		// Map iteration order is randomized in Go; sorting the keys keeps the
@@ -36,7 +51,7 @@ func collect(value any, parts *[]string) {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			collect(item[key], parts)
+			w.collect(item[key])
 		}
 	}
 }

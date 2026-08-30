@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/example/ai-audit-gateway/internal/audit"
@@ -76,18 +77,40 @@ func (e *Engine) Replace(definitions []Definition) error {
 	return nil
 }
 
+type matchScratch struct {
+	seen    []uint32
+	gen     uint32
+	matches []int
+	buffer  []byte
+}
+
+var scratchPool = sync.Pool{New: func() any { return new(matchScratch) }}
+
 func (e *Engine) Audit(_ context.Context, input audit.Input) audit.Result {
 	result := audit.Result{}
 	snapshot := e.current.Load()
 	if snapshot == nil {
 		return result
 	}
+	// input.Text is already NFKC-normalized lowercase from the normalize
+	// package; ToLower keeps direct callers correct and is free when the text
+	// has no uppercase runes.
 	text := strings.ToLower(input.Text)
-	for _, index := range ahoMatches(snapshot.aho, []byte(text)) {
+	scratch := scratchPool.Get().(*matchScratch)
+	scratch.buffer = append(scratch.buffer[:0], text...)
+	scratch.gen++
+	if scratch.gen == 0 {
+		for i := range scratch.seen {
+			scratch.seen[i] = 0
+		}
+		scratch.gen = 1
+	}
+	for _, index := range ahoMatches(snapshot.aho, scratch) {
 		item := snapshot.rules[index]
 		result.Matches = append(result.Matches, toMatch(item))
 		result.Score += item.definition.Weight
 	}
+	scratchPool.Put(scratch)
 	for _, item := range snapshot.rules {
 		if item.re == nil || !item.re.MatchString(text) {
 			continue
@@ -150,13 +173,16 @@ func buildAho(snapshot *Snapshot) {
 	}
 }
 
-func ahoMatches(nodes []ahoNode, text []byte) []int {
+// ahoMatches walks the automaton over the scratch buffer and returns rule
+// indexes, reusing the pooled scratch for dedup (generational markers instead
+// of a per-call map) and for the byte conversion of the input text.
+func ahoMatches(nodes []ahoNode, scratch *matchScratch) []int {
 	if len(nodes) == 0 {
 		return nil
 	}
+	text := scratch.buffer
 	state := 0
-	seen := make(map[int]struct{})
-	matches := make([]int, 0)
+	scratch.matches = scratch.matches[:0]
 	for _, char := range text {
 		for state != 0 {
 			if next, ok := nodes[state].next[char]; ok {
@@ -170,11 +196,19 @@ func ahoMatches(nodes []ahoNode, text []byte) []int {
 		}
 	matched:
 		for _, index := range nodes[state].terms {
-			if _, ok := seen[index]; !ok {
-				seen[index] = struct{}{}
-				matches = append(matches, index)
+			if int(index) >= len(scratch.seen) {
+				scratch.seen = append(scratch.seen, make([]uint32, int(index)+1-len(scratch.seen))...)
+			}
+			if scratch.seen[index] != scratch.gen {
+				scratch.seen[index] = scratch.gen
+				scratch.matches = append(scratch.matches, index)
 			}
 		}
 	}
-	return matches
+	if len(scratch.matches) == 0 {
+		return nil
+	}
+	result := make([]int, len(scratch.matches))
+	copy(result, scratch.matches)
+	return result
 }
