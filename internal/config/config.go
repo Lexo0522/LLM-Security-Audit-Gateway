@@ -46,6 +46,9 @@ type Config struct {
 	HealthProbeIntervalMS     int
 	HealthProbeTimeoutMS      int
 	SnapshotRefreshIntervalMS int
+	AuditRecordsRetentionDays int
+	OutboxRetentionDays       int
+	RetentionSweepIntervalMS  int
 }
 
 func Load() (Config, error) {
@@ -105,6 +108,9 @@ func Load() (Config, error) {
 		HealthProbeIntervalMS:     intOpt("HEALTH_PROBE_INTERVAL_MS", 5000),
 		HealthProbeTimeoutMS:      intOpt("HEALTH_PROBE_TIMEOUT_MS", 750),
 		SnapshotRefreshIntervalMS: intOpt("SNAPSHOT_REFRESH_INTERVAL_MS", 30000),
+		AuditRecordsRetentionDays: intOpt("AUDIT_RECORDS_RETENTION_DAYS", 30),
+		OutboxRetentionDays:       intOpt("OUTBOX_RETENTION_DAYS", 7),
+		RetentionSweepIntervalMS:  intOpt("RETENTION_SWEEP_INTERVAL_MS", 3600000),
 	}
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)

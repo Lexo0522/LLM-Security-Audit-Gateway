@@ -19,3 +19,4 @@ ALTER TABLE audit_records ADD COLUMN IF NOT EXISTS body_bytes INTEGER NOT NULL D
 ALTER TABLE audit_records ADD COLUMN IF NOT EXISTS content_sha256 TEXT;
 ALTER TABLE audit_records ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
 CREATE UNIQUE INDEX IF NOT EXISTS audit_records_event_id_idx ON audit_records(event_id) WHERE event_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS audit_records_created_at_idx ON audit_records(created_at);

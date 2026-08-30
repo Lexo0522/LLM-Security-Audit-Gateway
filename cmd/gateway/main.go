@@ -243,6 +243,7 @@ func main() {
 	})
 	readiness.Start(ctx)
 	go refreshSnapshots(ctx, time.Duration(cfg.SnapshotRefreshIntervalMS)*time.Millisecond, registry, policies, logger, metrics)
+	runRetentionSweeper(ctx, cfg, repo, logger, metrics)
 	app := fiber.New(fiber.Config{BodyLimit: cfg.MaxBodyBytes, DisableStartupMessage: true})
 	handler := httpapi.New(cfg, registry, policies, keys, limiter, auditor, pipeline, metrics)
 	handler.SetShadowAuditor(shadowAuditor)
@@ -310,4 +311,43 @@ func refreshSnapshots(ctx context.Context, interval time.Duration, registry *rul
 			cancel()
 		}
 	}
+}
+
+// runRetentionSweeper periodically deletes expired audit records and published
+// outbox rows so PostgreSQL stays bounded. A zero sweep interval disables it;
+// a zero retention disables the corresponding table's cleanup.
+func runRetentionSweeper(ctx context.Context, cfg config.Config, repo *storage.Repository, logger *slog.Logger, metrics *observability.Metrics) {
+	if cfg.RetentionSweepIntervalMS <= 0 || repo == nil {
+		return
+	}
+	auditDeleted, outboxDeleted := 0.0, 0.0
+	go func() {
+		ticker := time.NewTicker(time.Duration(cfg.RetentionSweepIntervalMS) * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sweepCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+				auditRows, outboxRows, err := repo.CleanupExpired(sweepCtx,
+					time.Duration(cfg.AuditRecordsRetentionDays)*24*time.Hour,
+					time.Duration(cfg.OutboxRetentionDays)*24*time.Hour, 1000)
+				cancel()
+				if err != nil {
+					logger.Warn("retention cleanup failed", slog.Any("error", err))
+					metrics.Inc("audit_retention_sweeps_total", map[string]string{"result": "error"})
+					continue
+				}
+				auditDeleted += float64(auditRows)
+				outboxDeleted += float64(outboxRows)
+				metrics.Set("audit_retention_rows_deleted", auditDeleted, map[string]string{"table": "audit_records"})
+				metrics.Set("audit_retention_rows_deleted", outboxDeleted, map[string]string{"table": "audit_outbox"})
+				metrics.Inc("audit_retention_sweeps_total", map[string]string{"result": "success"})
+				if auditRows > 0 || outboxRows > 0 {
+					logger.Info("retention cleanup", slog.Int64("audit_records", auditRows), slog.Int64("audit_outbox", outboxRows))
+				}
+			}
+		}
+	}()
 }
