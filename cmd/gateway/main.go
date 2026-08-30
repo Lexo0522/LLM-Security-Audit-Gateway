@@ -48,7 +48,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	metrics := observability.NewMetrics()
-	repo, err := storage.Open(ctx, cfg.PostgresURL)
+	repo, err := storage.Open(ctx, cfg.PostgresURL, storage.PoolSettings{
+		MaxConns:        int32(cfg.PostgresPoolMaxConns),
+		MaxConnLifetime: time.Duration(cfg.PostgresConnMaxLifetimeMS) * time.Millisecond,
+		MaxConnIdleTime: time.Duration(cfg.PostgresConnMaxIdleMS) * time.Millisecond,
+	})
 	if err != nil || repo == nil {
 		logger.Error("postgres is required for gateway identity", slog.Any("error", err))
 		return
@@ -166,7 +170,7 @@ func main() {
 	repo.EnableOutbox(kafkaPublisher != nil)
 	pipeline := events.NewPipeline(cfg.EventQueueSize, repo, nil, logger, metrics)
 	defer pipeline.Close()
-	dispatcher := events.NewDispatcher(repo, kafkaPublisher, logger, metrics)
+	dispatcher := events.NewDispatcher(repo, kafkaPublisher, logger, metrics, cfg.OutboxClaimSize)
 	if dispatcher != nil {
 		dispatcher.Start(ctx)
 		defer dispatcher.Close()

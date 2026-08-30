@@ -44,11 +44,39 @@ type Repository struct {
 	outboxEnabled atomic.Bool
 }
 
-func Open(ctx context.Context, url string) (*Repository, error) {
+// PoolSettings carries optional pgxpool tuning; zero values keep the library
+// defaults so existing callers are unaffected.
+type PoolSettings struct {
+	MaxConns        int32
+	MinConns        int32
+	MaxConnLifetime time.Duration
+	MaxConnIdleTime time.Duration
+}
+
+func Open(ctx context.Context, url string, settings ...PoolSettings) (*Repository, error) {
 	if url == "" {
 		return nil, nil
 	}
-	pool, err := pgxpool.New(ctx, url)
+	poolConfig, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		return nil, err
+	}
+	if len(settings) > 0 {
+		s := settings[0]
+		if s.MaxConns > 0 {
+			poolConfig.MaxConns = s.MaxConns
+		}
+		if s.MinConns > 0 {
+			poolConfig.MinConns = s.MinConns
+		}
+		if s.MaxConnLifetime > 0 {
+			poolConfig.MaxConnLifetime = s.MaxConnLifetime
+		}
+		if s.MaxConnIdleTime > 0 {
+			poolConfig.MaxConnIdleTime = s.MaxConnIdleTime
+		}
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -450,6 +478,9 @@ func (r *Repository) StoreEvents(ctx context.Context, events []audit.Event) erro
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// Both statements per event are pipelined through one batch instead of
+	// paying a round trip per statement.
+	batch := &pgx.Batch{}
 	for _, e := range events {
 		e = audit.RedactEvidence(e)
 		matches, _ := json.Marshal(e.Matches)
@@ -462,15 +493,15 @@ func (r *Repository) StoreEvents(ctx context.Context, events []audit.Event) erro
 		// cannot use a partial index as an ON CONFLICT(event_id) arbiter without
 		// repeating its predicate, so let it infer any applicable unique index.
 		// This retains event-id idempotency while remaining migration-compatible.
-		if _, err := tx.Exec(ctx, `INSERT INTO audit_records(id,event_id,request_id,tenant_id,direction,path,model,risk_score,decision,rule_version,matches,auditor,auditor_error,latency_ms,body_bytes,content_sha256,metadata,api_key_id,policy_id,policy_revision,created_at) VALUES($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT DO NOTHING`, e.EventID, e.RequestID, e.TenantID, e.Direction, e.Path, e.Model, e.RiskScore, e.Decision, e.RuleVersion, matches, auditor, e.AuditorError, e.LatencyMS, e.BodyBytes, e.ContentSHA256, metadata, nullableUUID(e.APIKeyID), nullableUUID(e.PolicyID), nullableRevision(e.PolicyRevision), e.EventTime); err != nil {
-			return err
-		}
+		batch.Queue(`INSERT INTO audit_records(id,event_id,request_id,tenant_id,direction,path,model,risk_score,decision,rule_version,matches,auditor,auditor_error,latency_ms,body_bytes,content_sha256,metadata,api_key_id,policy_id,policy_revision,created_at) VALUES($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT DO NOTHING`, e.EventID, e.RequestID, e.TenantID, e.Direction, e.Path, e.Model, e.RiskScore, e.Decision, e.RuleVersion, matches, auditor, e.AuditorError, e.LatencyMS, e.BodyBytes, e.ContentSHA256, metadata, nullableUUID(e.APIKeyID), nullableUUID(e.PolicyID), nullableRevision(e.PolicyRevision), e.EventTime)
 		if r.outboxEnabled.Load() {
 			payload, _ := json.Marshal(e)
-			if _, err := tx.Exec(ctx, `INSERT INTO audit_outbox(event_id,tenant_id,payload) VALUES($1,$2,$3) ON CONFLICT(event_id) DO NOTHING`, e.EventID, e.TenantID, payload); err != nil {
-				return err
-			}
+			batch.Queue(`INSERT INTO audit_outbox(event_id,tenant_id,payload) VALUES($1,$2,$3) ON CONFLICT(event_id) DO NOTHING`, e.EventID, e.TenantID, payload)
 		}
+	}
+	results := tx.SendBatch(ctx, batch)
+	if err := results.Close(); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -505,8 +536,11 @@ func (r *Repository) ClaimOutbox(ctx context.Context, limit int, lease time.Dura
 	}
 	return result, rows.Err()
 }
-func (r *Repository) MarkOutboxPublished(ctx context.Context, eventID string) error {
-	_, err := r.pool.Exec(ctx, `UPDATE audit_outbox SET published_at=now(), lease_until=NULL,last_error=NULL WHERE event_id=$1`, eventID)
+func (r *Repository) MarkOutboxPublished(ctx context.Context, eventIDs []string) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx, `UPDATE audit_outbox SET published_at=now(), lease_until=NULL,last_error=NULL WHERE event_id=ANY($1)`, eventIDs)
 	return err
 }
 func (r *Repository) RetryOutbox(ctx context.Context, eventID string, attempts int, cause error) error {

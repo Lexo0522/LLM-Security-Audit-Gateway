@@ -29,7 +29,7 @@ type Publisher interface {
 type Source interface {
 	ClaimOutbox(ctx context.Context, limit int, lease time.Duration) ([]storage.OutboxRecord, error)
 	RetryOutbox(ctx context.Context, eventID string, attempts int, cause error) error
-	MarkOutboxPublished(ctx context.Context, eventID string) error
+	MarkOutboxPublished(ctx context.Context, eventIDs []string) error
 	OutboxPending(ctx context.Context) (int64, error)
 	OutboxPoison(ctx context.Context, maxAttempts int) (int64, error)
 }
@@ -43,7 +43,9 @@ func NewKafka(brokers []string, topic string) *KafkaPublisher {
 	if len(brokers) == 0 {
 		return nil
 	}
-	return &KafkaPublisher{brokers: brokers, writer: &kafka.Writer{Addr: kafka.TCP(brokers...), Topic: topic, RequiredAcks: kafka.RequireAll, Async: false, AllowAutoTopicCreation: true, WriteTimeout: 2 * time.Second, ReadTimeout: 2 * time.Second, Balancer: &kafka.Hash{}}}
+	// Batching and compression aggregate the per-event Publish calls of the
+	// dispatcher instead of paying a produce round trip per audit event.
+	return &KafkaPublisher{brokers: brokers, writer: &kafka.Writer{Addr: kafka.TCP(brokers...), Topic: topic, RequiredAcks: kafka.RequireAll, Async: false, AllowAutoTopicCreation: true, WriteTimeout: 2 * time.Second, ReadTimeout: 2 * time.Second, Balancer: &kafka.Hash{}, BatchSize: 100, BatchTimeout: 50 * time.Millisecond, Compression: kafka.Gzip}}
 }
 func (p *KafkaPublisher) Publish(ctx context.Context, event audit.Event) error {
 	if p == nil {
@@ -273,16 +275,25 @@ type Dispatcher struct {
 	metrics   *observability.Metrics
 	done      chan struct{}
 	cancel    context.CancelFunc
+	claimSize int
 }
 
-func NewDispatcher(source Source, publisher Publisher, logger *slog.Logger, metrics *observability.Metrics) *Dispatcher {
+// defaultClaimSize caps rows claimed per dispatch round; the dispatcher keeps
+// claiming without pause while a claim fills completely, so sustained backlog
+// drains faster than the one-second ticker would allow.
+const defaultClaimSize = 100
+
+func NewDispatcher(source Source, publisher Publisher, logger *slog.Logger, metrics *observability.Metrics, claimSize int) *Dispatcher {
 	if source == nil || publisher == nil {
 		return nil
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Dispatcher{source: source, publisher: publisher, logger: logger, metrics: metrics, done: make(chan struct{})}
+	if claimSize < 1 {
+		claimSize = defaultClaimSize
+	}
+	return &Dispatcher{source: source, publisher: publisher, logger: logger, metrics: metrics, done: make(chan struct{}), claimSize: claimSize}
 }
 func (d *Dispatcher) Start(ctx context.Context) {
 	if d == nil {
@@ -295,7 +306,12 @@ func (d *Dispatcher) Start(ctx context.Context) {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for {
-			d.dispatch(dispatchCtx)
+			claimed := d.dispatch(dispatchCtx)
+			if claimed >= d.claimSize && dispatchCtx.Err() == nil {
+				// The claim batch filled, so more rows are waiting: keep
+				// draining instead of idling until the next tick.
+				continue
+			}
 			select {
 			case <-dispatchCtx.Done():
 				return
@@ -314,15 +330,16 @@ func (d *Dispatcher) Close() {
 	<-d.done
 	_ = d.publisher.Close()
 }
-func (d *Dispatcher) dispatch(ctx context.Context) {
+func (d *Dispatcher) dispatch(ctx context.Context) int {
 	claimCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	records, err := d.source.ClaimOutbox(claimCtx, 100, 30*time.Second)
+	records, err := d.source.ClaimOutbox(claimCtx, d.claimSize, 30*time.Second)
 	cancel()
 	if err != nil {
 		d.logger.Warn("audit outbox claim failed", slog.Any("error", err))
 		d.metrics.Inc("audit_outbox_claims_total", map[string]string{"result": "error"})
-		return
+		return 0
 	}
+	published := make([]string, 0, len(records))
 	for _, record := range records {
 		var event audit.Event
 		// A payload that fails to decode must re-enter the retry path; falling
@@ -336,11 +353,11 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 			d.metrics.Inc("audit_kafka_events_total", map[string]string{"result": "error"})
 			continue
 		}
-		if err := d.source.MarkOutboxPublished(ctx, record.EventID); err != nil {
-			d.logger.Warn("mark audit outbox published", slog.Any("error", err))
-			continue
-		}
+		published = append(published, record.EventID)
 		d.metrics.Inc("audit_kafka_events_total", map[string]string{"result": "success"})
+	}
+	if err := d.source.MarkOutboxPublished(ctx, published); err != nil {
+		d.logger.Warn("mark audit outbox published", slog.Int("count", len(published)), slog.Any("error", err))
 	}
 	if pending, err := d.source.OutboxPending(ctx); err == nil {
 		d.metrics.Set("audit_outbox_pending", float64(pending), nil)
@@ -348,6 +365,7 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 	if poison, err := d.source.OutboxPoison(ctx, storage.MaxOutboxAttempts); err == nil {
 		d.metrics.Set("audit_outbox_poison", float64(poison), nil)
 	}
+	return len(records)
 }
 
 var _ Sink = (*storage.Repository)(nil)

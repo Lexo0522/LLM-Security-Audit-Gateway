@@ -21,6 +21,10 @@ type Config struct {
 	AuditEnabled              bool
 	FailClosed                bool
 	PostgresURL               string
+	PostgresPoolMaxConns      int
+	PostgresConnMaxLifetimeMS int
+	PostgresConnMaxIdleMS     int
+	OutboxClaimSize           int
 	RedisURL                  string
 	KafkaBrokers              []string
 	KafkaAuditTopic           string
@@ -76,6 +80,10 @@ func Load() (Config, error) {
 		AuditEnabled:              boolOpt("AUDIT_ENABLED", true),
 		FailClosed:                boolOpt("AUDIT_FAIL_CLOSED", false),
 		PostgresURL:               os.Getenv("POSTGRES_URL"),
+		PostgresPoolMaxConns:      intOpt("PG_POOL_MAX_CONNS", 16),
+		PostgresConnMaxLifetimeMS: intOpt("PG_CONN_MAX_LIFETIME_MS", 1800000),
+		PostgresConnMaxIdleMS:     intOpt("PG_CONN_MAX_IDLE_MS", 300000),
+		OutboxClaimSize:           intOpt("OUTBOX_CLAIM_SIZE", 100),
 		RedisURL:                  os.Getenv("REDIS_URL"),
 		KafkaBrokers:              envList("KAFKA_BROKERS"),
 		KafkaAuditTopic:           env("KAFKA_AUDIT_TOPIC", "audit.events"),

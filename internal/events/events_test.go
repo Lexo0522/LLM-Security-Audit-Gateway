@@ -116,10 +116,10 @@ func (s *fakeSource) RetryOutbox(_ context.Context, eventID string, _ int, _ err
 	s.retried = append(s.retried, eventID)
 	return nil
 }
-func (s *fakeSource) MarkOutboxPublished(_ context.Context, eventID string) error {
+func (s *fakeSource) MarkOutboxPublished(_ context.Context, eventIDs []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.published = append(s.published, eventID)
+	s.published = append(s.published, eventIDs...)
 	return nil
 }
 func (s *fakeSource) OutboxPending(context.Context) (int64, error)     { return s.pending, nil }
@@ -142,7 +142,7 @@ func (p *fakePublisher) Close() error { return nil }
 func newTestDispatcher(t *testing.T, source Source, publisher Publisher) (*Dispatcher, *observability.Metrics) {
 	t.Helper()
 	metrics := observability.NewMetrics()
-	dispatcher := NewDispatcher(source, publisher, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics)
+	dispatcher := NewDispatcher(source, publisher, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics, 0)
 	if dispatcher == nil {
 		t.Fatal("dispatcher should not be nil")
 	}
