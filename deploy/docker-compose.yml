@@ -25,10 +25,14 @@ services:
       ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:-}"
       GATEWAY_API_KEY_PEPPER: "${GATEWAY_API_KEY_PEPPER:?GATEWAY_API_KEY_PEPPER is required and must be at least 32 bytes}"
     depends_on:
-      - newapi
-      - postgres
-      - redis
-      - kafka
+      newapi:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     restart: unless-stopped
 
   audit-consumer:
@@ -51,8 +55,10 @@ services:
       CLICKHOUSE_DSN: "http://audit:${CLICKHOUSE_PASSWORD:-change-me}@clickhouse:8123/default"
       AUDIT_CONSUMER_LISTEN_ADDR: ":9090"
     depends_on:
-      - kafka
-      - clickhouse
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
     restart: unless-stopped
 
   newapi:
@@ -69,6 +75,11 @@ services:
       - "6379"
     ports:
       - "${INTEGRATION_REDIS_PORT:-16379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
     restart: unless-stopped
 
   postgres:
@@ -81,6 +92,11 @@ services:
       - postgres-data:/var/lib/postgresql/data
     ports:
       - "${INTEGRATION_POSTGRES_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U audit -d audit_gateway"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
     restart: unless-stopped
 
   clickhouse:
@@ -96,6 +112,11 @@ services:
       - "${INTEGRATION_CLICKHOUSE_PORT:-18123}:8123"
     volumes:
       - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
     restart: unless-stopped
 
   kafka:
@@ -112,12 +133,22 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
     expose:
       - "9092"
     ports:
       - "${INTEGRATION_KAFKA_PORT:-19092}:9094"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
 
 volumes:
   postgres-data:
   clickhouse-data:
+  kafka-data:
