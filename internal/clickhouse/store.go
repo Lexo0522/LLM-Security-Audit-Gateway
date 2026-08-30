@@ -84,8 +84,31 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("clickhouse disabled")
 	}
-	_, err := s.db.ExecContext(ctx, schemaDDL)
-	return err
+	if _, err := s.db.ExecContext(ctx, schemaDDL); err != nil {
+		return err
+	}
+	// Metadata-only idempotent ALTERs for indexes the original CREATE TABLE
+	// did not include; they apply to new parts and merged parts. Existing
+	// parts are not materialized (that would trigger a mutation on every
+	// start), so event_id lookups on old partitions stay a full scan until
+	// parts are rewritten.
+	for _, statement := range schemaIndexes {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var schemaIndexes = []string{
+	`ALTER TABLE audit_events ADD INDEX IF NOT EXISTS audit_events_event_id_idx event_id TYPE bloom_filter GRANULARITY 4`,
+}
+
+// dedupSource replaces the merge-on-read FINAL modifier: ReplacingMergeTree
+// duplicates (redelivered events) collapse by the table's ORDER BY key before
+// aggregation, without forcing every query to merge parts at read time.
+func dedupSource(condition string) string {
+	return "SELECT * FROM audit_events WHERE " + condition + " LIMIT 1 BY tenant_id, event_time, event_id"
 }
 
 func ValidateEvent(event audit.Event) error {
@@ -300,7 +323,10 @@ func (s *Store) ListEvents(ctx context.Context, filter EventFilter) (EventPage, 
 		return EventPage{}, err
 	}
 	args = append(args, filter.Limit+1)
-	rows, err := s.db.QueryContext(ctx, "SELECT "+eventColumns+" FROM audit_events FINAL WHERE "+condition+" ORDER BY event_time DESC,event_id DESC LIMIT ?", args...)
+	rows, err := s.db.QueryContext(ctx, "SELECT "+eventColumns+" FROM ("+
+		"SELECT "+eventColumns+" FROM audit_events WHERE "+condition+
+		" ORDER BY event_time DESC, event_id DESC LIMIT 1 BY tenant_id, event_time, event_id LIMIT ?"+
+		") ORDER BY event_time DESC, event_id DESC", args...)
 	if err != nil {
 		return EventPage{}, err
 	}
@@ -327,7 +353,7 @@ func (s *Store) GetEvent(ctx context.Context, eventID string) (audit.Event, erro
 	if _, err := uuid.Parse(eventID); err != nil {
 		return audit.Event{}, fmt.Errorf("%w: event_id", ErrInvalidFilter)
 	}
-	row := s.db.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM audit_events FINAL WHERE event_id = toUUID(?) LIMIT 1", eventID)
+	row := s.db.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM audit_events WHERE event_id = toUUID(?) ORDER BY ingested_at DESC LIMIT 1", eventID)
 	event, err := scanEvent(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return audit.Event{}, ErrNotFound
@@ -348,14 +374,14 @@ func (s *Store) Summary(ctx context.Context, filter EventFilter, bucket string) 
 		return Summary{}, err
 	}
 	result := Summary{ByDecision: map[string]int64{}, ByDirection: map[string]int64{}, ByModel: map[string]int64{}, ByPath: map[string]int64{}, ByRule: map[string]int64{}}
-	if err = s.db.QueryRowContext(ctx, "SELECT count(), ifNull(avgOrNull(risk_score), 0), ifNull(maxOrNull(risk_score), 0), ifNull(avgOrNull(latency_ms), 0), ifNull(maxOrNull(latency_ms), 0) FROM audit_events FINAL WHERE "+condition, args...).Scan(&result.TotalEvents, &result.AverageRisk, &result.MaximumRisk, &result.AverageLatencyMS, &result.MaximumLatencyMS); err != nil {
+	if err = s.db.QueryRowContext(ctx, "SELECT count(), ifNull(avgOrNull(risk_score), 0), ifNull(maxOrNull(risk_score), 0), ifNull(avgOrNull(latency_ms), 0), ifNull(maxOrNull(latency_ms), 0) FROM ("+dedupSource(condition)+")", args...).Scan(&result.TotalEvents, &result.AverageRisk, &result.MaximumRisk, &result.AverageLatencyMS, &result.MaximumLatencyMS); err != nil {
 		return Summary{}, err
 	}
 	for _, aggregate := range []struct {
 		column string
 		into   map[string]int64
 	}{{"decision", result.ByDecision}, {"direction", result.ByDirection}, {"model", result.ByModel}, {"path", result.ByPath}} {
-		rows, queryErr := s.db.QueryContext(ctx, "SELECT "+aggregate.column+", count() FROM audit_events FINAL WHERE "+condition+" GROUP BY "+aggregate.column, args...)
+		rows, queryErr := s.db.QueryContext(ctx, "SELECT "+aggregate.column+", count() FROM ("+dedupSource(condition)+") GROUP BY "+aggregate.column, args...)
 		if queryErr != nil {
 			return Summary{}, queryErr
 		}
@@ -374,7 +400,7 @@ func (s *Store) Summary(ctx context.Context, filter EventFilter, bucket string) 
 		}
 		rows.Close()
 	}
-	ruleRows, err := s.db.QueryContext(ctx, "SELECT rule_id, count() FROM (SELECT JSONExtractString(arrayJoin(JSONExtractArrayRaw(matches)), 'rule_id') AS rule_id FROM audit_events FINAL WHERE "+condition+") WHERE rule_id != '' GROUP BY rule_id", args...)
+	ruleRows, err := s.db.QueryContext(ctx, "SELECT rule_id, count() FROM (SELECT JSONExtractString(arrayJoin(JSONExtractArrayRaw(matches)), 'rule_id') AS rule_id FROM ("+dedupSource(condition)+")) WHERE rule_id != '' GROUP BY rule_id", args...)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -396,7 +422,7 @@ func (s *Store) Summary(ctx context.Context, filter EventFilter, bucket string) 
 	if bucket == "day" {
 		function = "toStartOfDay"
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+function+"(event_time), count(), avgOrNull(risk_score), max(risk_score) FROM audit_events FINAL WHERE "+condition+" GROUP BY 1 ORDER BY 1", args...)
+	rows, err := s.db.QueryContext(ctx, "SELECT "+function+"(event_time), count(), avgOrNull(risk_score), max(risk_score) FROM ("+dedupSource(condition)+") GROUP BY 1 ORDER BY 1", args...)
 	if err != nil {
 		return Summary{}, err
 	}
