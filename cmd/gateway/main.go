@@ -150,8 +150,13 @@ func main() {
 		defer limiter.Close()
 	}
 	var auditor audit.Auditor = audit.NoopAuditor{}
+	var shadowAuditor audit.Auditor
 	if cfg.AuditorURL != "" {
-		auditor = audit.NewCircuitBreaker(&audit.HTTPAuditor{URL: cfg.AuditorURL, Model: cfg.AuditorModel, Client: &http.Client{Timeout: time.Duration(cfg.AuditorTimeoutMS) * time.Millisecond}}, 5, cfg.AuditorConcurrency, 30*time.Second, metrics)
+		upstream := &audit.HTTPAuditor{URL: cfg.AuditorURL, Model: cfg.AuditorModel, Client: &http.Client{Timeout: time.Duration(cfg.AuditorTimeoutMS) * time.Millisecond}}
+		auditor = audit.NewCircuitBreaker(upstream, 5, cfg.AuditorConcurrency, 30*time.Second, metrics)
+		// Shadow audits get their own breaker so they can neither consume the
+		// synchronous concurrency budget nor open the synchronous circuit.
+		shadowAuditor = audit.NewCircuitBreaker(upstream, 5, cfg.AuditorConcurrency, 30*time.Second, metrics)
 	}
 	kafkaPublisher := events.NewKafka(cfg.KafkaBrokers, cfg.KafkaAuditTopic)
 	repo.EnableOutbox(kafkaPublisher != nil)
@@ -232,6 +237,7 @@ func main() {
 	go refreshSnapshots(ctx, time.Duration(cfg.SnapshotRefreshIntervalMS)*time.Millisecond, registry, policies, logger, metrics)
 	app := fiber.New(fiber.Config{BodyLimit: cfg.MaxBodyBytes, DisableStartupMessage: true})
 	handler := httpapi.New(cfg, registry, policies, keys, limiter, auditor, pipeline, metrics)
+	handler.SetShadowAuditor(shadowAuditor)
 	handler.SetReadiness(readiness)
 	handler.Register(app)
 	if cfg.AdminToken != "" {

@@ -35,19 +35,29 @@ import (
 )
 
 type Handler struct {
-	cfg        config.Config
-	rules      *rule.Registry
-	policies   *policy.Resolver
-	identities auth.Authenticator
-	upstream   *proxy.Client
-	limiter    ratelimit.Limiter
-	auditor    audit.Auditor
-	events     *events.Pipeline
-	metrics    *observability.Metrics
-	readiness  *health.Manager
+	cfg           config.Config
+	rules         *rule.Registry
+	policies      *policy.Resolver
+	identities    auth.Authenticator
+	upstream      *proxy.Client
+	limiter       ratelimit.Limiter
+	auditor       audit.Auditor
+	shadowAuditor audit.Auditor
+	events        *events.Pipeline
+	metrics       *observability.Metrics
+	readiness     *health.Manager
 }
 
 func (h *Handler) SetReadiness(readiness *health.Manager) { h.readiness = readiness }
+
+// SetShadowAuditor swaps the auditor used by asynchronous shadow audits so
+// shadow traffic shares neither the failure count nor the concurrency budget of
+// the synchronous path.
+func (h *Handler) SetShadowAuditor(auditor audit.Auditor) {
+	if auditor != nil {
+		h.shadowAuditor = auditor
+	}
+}
 
 func New(cfg config.Config, rules *rule.Registry, policies *policy.Resolver, identities auth.Authenticator, limiter ratelimit.Limiter, auditor audit.Auditor, pipeline *events.Pipeline, metrics ...*observability.Metrics) *Handler {
 	if limiter == nil {
@@ -66,7 +76,7 @@ func New(cfg config.Config, rules *rule.Registry, policies *policy.Resolver, ide
 	if collector == nil {
 		collector = observability.NewMetrics()
 	}
-	return &Handler{cfg: cfg, rules: rules, policies: policies, identities: identities, upstream: proxy.New(cfg), limiter: limiter, auditor: auditor, events: pipeline, metrics: collector}
+	return &Handler{cfg: cfg, rules: rules, policies: policies, identities: identities, upstream: proxy.New(cfg), limiter: limiter, auditor: auditor, shadowAuditor: auditor, events: pipeline, metrics: collector}
 }
 
 func (h *Handler) Register(app *fiber.App) {
@@ -244,7 +254,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 func (h *Handler) shadow(input audit.Input, result audit.Result, ruleVersion string, configured policy.Policy, body []byte) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(h.cfg.AuditorTimeoutMS)*time.Millisecond)
 	defer cancel()
-	res, err := h.auditor.Audit(ctx, input)
+	res, err := h.shadowAuditor.Audit(ctx, input)
 	if err != nil {
 		h.emit(input, result, ruleVersion, configured, policy.Allow, nil, err.Error(), time.Now(), body)
 		return

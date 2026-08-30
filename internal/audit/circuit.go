@@ -58,8 +58,16 @@ func (b *CircuitBreaker) Audit(ctx context.Context, input Input) (ModelResult, e
 	started := time.Now()
 	result, err := b.inner.Audit(ctx, input)
 	b.metrics.Observe("audit_auditor_duration_seconds", time.Since(started).Seconds(), map[string]string{"result": map[bool]string{true: "error", false: "success"}[err != nil]})
+	// Client-side cancellation is not an auditor health signal; counting it
+	// would let disconnecting clients open the circuit and block the
+	// synchronous fail-closed path.
+	canceled := errors.Is(err, context.Canceled)
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if canceled {
+		b.metrics.Inc("audit_auditor_calls_total", map[string]string{"result": "canceled"})
+		return result, err
+	}
 	if err == nil {
 		b.failures = 0
 		b.metrics.Inc("audit_auditor_calls_total", map[string]string{"result": "success"})
