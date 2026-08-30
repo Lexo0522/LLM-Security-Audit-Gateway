@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -24,6 +25,7 @@ import (
 type Admin struct {
 	Token         string
 	Logger        *slog.Logger
+	Pepper        string
 	Repo          *storage.Repository
 	Rules         *rule.Registry
 	RuleChanged   func(context.Context, string)
@@ -32,6 +34,7 @@ type Admin struct {
 	Policies      *policy.Resolver
 	PolicyChanged func(context.Context)
 	Audit         AuditReader
+	throttle      *authThrottle
 }
 
 // fail logs the underlying cause and returns a client-safe response. Only
@@ -54,6 +57,10 @@ func (a *Admin) fail(operation string, err error) error {
 }
 
 func (a *Admin) Register(app *fiber.App) {
+	// Failed admin token guesses are throttled per client address.
+	if a.throttle == nil {
+		a.throttle = newAuthThrottle(30, time.Minute)
+	}
 	app.Use(a.authenticate)
 	app.Post("/admin/v1/rule-sets", a.create)
 	app.Get("/admin/v1/rule-sets", a.list)
@@ -79,8 +86,12 @@ type AuditReader interface {
 }
 
 func (a *Admin) authenticate(c *fiber.Ctx) error {
+	if a.throttle.blocked(c.IP()) {
+		return fiber.ErrTooManyRequests
+	}
 	value := strings.TrimPrefix(c.Get(fiber.HeaderAuthorization), "Bearer ")
 	if value == "" || subtle.ConstantTimeCompare([]byte(value), []byte(a.Token)) != 1 {
+		a.throttle.fail(c.IP())
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": fiber.Map{"message": "invalid admin token"}})
 	}
 	return c.Next()
@@ -251,10 +262,14 @@ func (a *Admin) emitOperation(c *fiber.Ctx, operation, scope, outcome, version s
 		return
 	}
 	token := strings.TrimPrefix(c.Get(fiber.HeaderAuthorization), "Bearer ")
-	sum := sha256.Sum256([]byte(token))
+	// The actor digest is peppered like gateway API key HMACs: a plain hash of
+	// a low-entropy token would be reversible by dictionary enumeration.
+	mac := hmac.New(sha256.New, []byte(a.Pepper))
+	mac.Write([]byte(token))
+	actorHash := hex.EncodeToString(mac.Sum(nil))
 	requestID := c.Get("X-Request-ID")
 	if requestID == "" {
 		requestID = uuid.NewString()
 	}
-	a.Events.Enqueue(audit.Event{SchemaVersion: "2", EventID: uuid.NewString(), EventTime: time.Now().UTC(), RequestID: requestID, TenantID: "admin", Direction: audit.DirectionAdmin, Path: c.Path(), Decision: outcome, RuleVersion: version, Metadata: map[string]string{"operation": operation, "scope": scope, "actor_hash": hex.EncodeToString(sum[:]), "outcome": outcome}})
+	a.Events.Enqueue(audit.Event{SchemaVersion: "2", EventID: uuid.NewString(), EventTime: time.Now().UTC(), RequestID: requestID, TenantID: "admin", Direction: audit.DirectionAdmin, Path: c.Path(), Decision: outcome, RuleVersion: version, Metadata: map[string]string{"operation": operation, "scope": scope, "actor_hash": actorHash, "outcome": outcome}})
 }

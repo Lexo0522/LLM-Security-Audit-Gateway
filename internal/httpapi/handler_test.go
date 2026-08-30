@@ -613,3 +613,24 @@ func TestAuditDisabledProxiesWithoutAuditing(t *testing.T) {
 		t.Fatalf("disabled audit must not persist events: %#v", sink.events)
 	}
 }
+
+func TestPublicAuthFailuresAreThrottled(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer upstream.Close()
+	app := fiber.New()
+	testHandler(t, config.Config{UpstreamURL: upstream.URL, MaxBodyBytes: 1024, MaxResponseBytes: 1024}, testAuthenticator{err: auth.ErrInvalidKey}).Register(app)
+	var lastStatus int
+	for i := 0; i < 31; i++ {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test"}`))
+		request.Header.Set("Authorization", "Bearer wrong-key")
+		response, err := app.Test(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		lastStatus = response.StatusCode
+	}
+	if lastStatus != http.StatusTooManyRequests {
+		t.Fatalf("status=%d, want 429 after repeated invalid keys", lastStatus)
+	}
+}

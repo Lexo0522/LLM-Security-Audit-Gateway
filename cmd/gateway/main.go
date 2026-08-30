@@ -246,7 +246,7 @@ func main() {
 	handler.Register(app)
 	if cfg.AdminToken != "" {
 		admin := fiber.New(fiber.Config{DisableStartupMessage: true})
-		(&httpapi.Admin{Token: cfg.AdminToken, Logger: logger, Repo: repo, Rules: registry, Events: pipeline, Keys: keys, Policies: policies, Audit: auditStore, PolicyChanged: func(ctx context.Context) {
+		(&httpapi.Admin{Token: cfg.AdminToken, Logger: logger, Pepper: cfg.APIKeyPepper, Repo: repo, Rules: registry, Events: pipeline, Keys: keys, Policies: policies, Audit: auditStore, PolicyChanged: func(ctx context.Context) {
 			if policyNotifier != nil {
 				policyNotifier.Notify(ctx)
 			}

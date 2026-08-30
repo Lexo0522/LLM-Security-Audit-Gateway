@@ -46,6 +46,7 @@ type Handler struct {
 	events        *events.Pipeline
 	metrics       *observability.Metrics
 	readiness     *health.Manager
+	authThrottle  *authThrottle
 }
 
 func (h *Handler) SetReadiness(readiness *health.Manager) { h.readiness = readiness }
@@ -76,7 +77,7 @@ func New(cfg config.Config, rules *rule.Registry, policies *policy.Resolver, ide
 	if collector == nil {
 		collector = observability.NewMetrics()
 	}
-	return &Handler{cfg: cfg, rules: rules, policies: policies, identities: identities, upstream: proxy.New(cfg), limiter: limiter, auditor: auditor, shadowAuditor: auditor, events: pipeline, metrics: collector}
+	return &Handler{cfg: cfg, rules: rules, policies: policies, identities: identities, upstream: proxy.New(cfg), limiter: limiter, auditor: auditor, shadowAuditor: auditor, events: pipeline, metrics: collector, authThrottle: newAuthThrottle(30, time.Minute)}
 }
 
 func (h *Handler) Register(app *fiber.App) {
@@ -114,11 +115,20 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		return identityUnavailable(c)
 	}
 	requestContext := c.UserContext()
+	// Failed gateway key lookups hit PostgreSQL, so repeated invalid keys are
+	// throttled per client address before they can be replayed.
+	if h.authThrottle.blocked(c.IP()) {
+		h.metrics.Inc("auth_throttle_rejections_total", nil)
+		c.Set("Retry-After", "60")
+		return c.Status(429).JSON(fiber.Map{"error": fiber.Map{"message": "too many failed authentications", "type": "rate_limit_error", "code": "auth_throttled"}})
+	}
 	identity, err := h.identities.Authenticate(requestContext, c.Get(fiber.HeaderAuthorization))
 	if err != nil {
 		if errors.Is(err, auth.ErrUnavailable) {
 			return identityUnavailable(c)
 		}
+		h.authThrottle.fail(c.IP())
+		h.metrics.Inc("auth_failures_total", nil)
 		return invalidAPIKey(c)
 	}
 	allowed, retry, err := h.limiter.Allow(requestContext, identity.TenantID+":"+c.Path())

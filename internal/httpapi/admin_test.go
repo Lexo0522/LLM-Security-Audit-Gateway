@@ -146,3 +146,41 @@ func TestAdminAuditQueriesRequireTokenAndForwardFilters(t *testing.T) {
 	}
 	response.Body.Close()
 }
+
+func TestAdminAuthenticateThrottlesFailures(t *testing.T) {
+	app := fiber.New()
+	(&Admin{Token: "admin-token", Repo: nil}).Register(app)
+	for i := 0; i < 30; i++ {
+		request := httptest.NewRequest(http.MethodGet, "/admin/v1/rule-sets", nil)
+		request.Header.Set("Authorization", "Bearer wrong")
+		response, err := app.Test(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if i < 29 && response.StatusCode == http.StatusTooManyRequests {
+			t.Fatalf("throttled too early at attempt %d", i+1)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/rule-sets", nil)
+	request.Header.Set("Authorization", "Bearer wrong")
+	response, err := app.Test(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status=%d, want 429 after repeated failures", response.StatusCode)
+	}
+	// Even a valid token stays throttled for this address until the window passes.
+	valid := httptest.NewRequest(http.MethodGet, "/admin/v1/rule-sets", nil)
+	valid.Header.Set("Authorization", "Bearer admin-token")
+	response, err = app.Test(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("valid token status=%d, want 429 while throttled", response.StatusCode)
+	}
+}
