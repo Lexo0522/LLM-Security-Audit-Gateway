@@ -109,9 +109,9 @@ type Status struct {
 	LastError string `json:"last_error,omitempty"`
 }
 
-// The publisher argument remains for source compatibility. Kafka delivery is
-// deliberately performed by Dispatcher after the transaction commits.
-func NewPipeline(size int, sink Sink, _ Publisher, logger *slog.Logger, metrics ...*observability.Metrics) *Pipeline {
+// Kafka delivery is deliberately performed by Dispatcher after the
+// transaction commits, so the pipeline only needs its PostgreSQL sink.
+func NewPipeline(size int, sink Sink, logger *slog.Logger, metrics ...*observability.Metrics) *Pipeline {
 	if size < 1 {
 		size = 1000
 	}

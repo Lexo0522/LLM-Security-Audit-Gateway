@@ -328,5 +328,3 @@ func Flush(writer io.Writer) {
 		flusher.Flush()
 	}
 }
-
-func EventText(data []byte) []byte { return bytes.TrimSpace(bytes.TrimPrefix(data, []byte("data:"))) }

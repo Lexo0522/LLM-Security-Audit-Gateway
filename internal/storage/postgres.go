@@ -590,12 +590,6 @@ func (e *ValidationError) Unwrap() error { return e.err }
 
 // IsNotFound reports whether err is a PostgreSQL no-rows scan result.
 func IsNotFound(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
-func min(left, right int) int {
-	if left < right {
-		return left
-	}
-	return right
-}
 func nullableUUID(value string) any {
 	if value == "" {
 		return nil

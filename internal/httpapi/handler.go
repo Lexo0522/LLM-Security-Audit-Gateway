@@ -485,10 +485,3 @@ func encodingError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fiber.Map{"message": "request content encoding is malformed", "type": "invalid_request_error", "code": "invalid_content_encoding"}})
 	}
 }
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}

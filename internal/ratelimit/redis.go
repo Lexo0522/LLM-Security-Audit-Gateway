@@ -141,7 +141,7 @@ func (l *AdaptiveLimiter) allowLocal(key string) (bool, time.Duration, error) {
 		bucket.tokens = float64(l.burst)
 		bucket.at = now
 	}
-	bucket.tokens = minFloat(float64(l.burst), bucket.tokens+now.Sub(bucket.at).Seconds()*float64(l.rps))
+	bucket.tokens = min(float64(l.burst), bucket.tokens+now.Sub(bucket.at).Seconds()*float64(l.rps))
 	bucket.at = now
 	allowed := bucket.tokens >= 1
 	if allowed {
@@ -174,10 +174,4 @@ func (l *AdaptiveLimiter) Health(ctx context.Context) error {
 		return fmt.Errorf("redis disabled")
 	}
 	return l.remote.client.Ping(ctx).Err()
-}
-func minFloat(left, right float64) float64 {
-	if left < right {
-		return left
-	}
-	return right
 }

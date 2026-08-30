@@ -137,6 +137,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 		c.metrics.Inc("audit_clickhouse_consumer_commits_total", map[string]string{"result": "success"})
 	}
 }
+
 // sampleStats surfaces reader lag, rebalances, and fetch errors as gauges; lag
 // is the primary signal that the ClickHouse pipeline is falling behind.
 func (c *Consumer) sampleStats(ctx context.Context) {
@@ -173,6 +174,7 @@ func (c *Consumer) ensureSchema(ctx context.Context) error {
 		}
 	}
 }
+
 // maxInsertAttempts bounds ClickHouse insert retries; exceeding it returns an
 // error so the process exits and the supervisor restarts consumption from the
 // last committed offset instead of spinning forever on a broken destination.

@@ -1,5 +1,0 @@
-开发一个独立的 AI API安全审计网关（AI Firewall Gateway），部署在用户与NewAPI之间，实现请求审计、违规检测、自动拦截、风险评分、日志分析，并尽可能保持低延迟。
-
-网关采用Go Gin/Fiber、代理采用fasthttp、规则采用Aho-Corasick、缓存采用Redis、数据库采用PostgreSQL、日志采用ClickHouse、消息采用Kafka、后台采用Vue3、安全模型采、Qwen2.5/Llama Guard或者自定义审计模型、部署采用Docker Compose
-
-LLM-Security‑Audit-Gateway

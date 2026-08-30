@@ -301,7 +301,7 @@ func TestSSEAuditEventsIncludeChannelAndRedactEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink := &handlerMemorySink{}
-	pipeline := events.NewPipeline(4, sink, nil, nil)
+	pipeline := events.NewPipeline(4, sink, nil)
 	app := fiber.New()
 	New(config.Config{UpstreamURL: upstream.URL, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a"}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, pipeline).Register(app)
 	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test"}`)))
@@ -378,7 +378,7 @@ func TestResponsesSSERedactPreservesRawEventAndAuditMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink := &handlerMemorySink{}
-	pipeline := events.NewPipeline(4, sink, nil, nil)
+	pipeline := events.NewPipeline(4, sink, nil)
 	app := fiber.New()
 	New(config.Config{UpstreamURL: upstream.URL, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a"}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, pipeline).Register(app)
 	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test","stream":true}`)))
@@ -596,7 +596,7 @@ func TestAuditDisabledProxiesWithoutAuditing(t *testing.T) {
 	}))
 	defer upstream.Close()
 	sink := &handlerMemorySink{}
-	pipeline := events.NewPipeline(4, sink, nil, nil)
+	pipeline := events.NewPipeline(4, sink, nil)
 	app := fiber.New()
 	New(config.Config{UpstreamURL: upstream.URL, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: false}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a"}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, pipeline).Register(app)
 	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"prompt":"needle"}`)))

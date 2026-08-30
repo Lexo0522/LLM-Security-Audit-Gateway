@@ -168,7 +168,7 @@ func main() {
 	}
 	kafkaPublisher := events.NewKafka(cfg.KafkaBrokers, cfg.KafkaAuditTopic)
 	repo.EnableOutbox(kafkaPublisher != nil)
-	pipeline := events.NewPipeline(cfg.EventQueueSize, repo, nil, logger, metrics)
+	pipeline := events.NewPipeline(cfg.EventQueueSize, repo, logger, metrics)
 	defer pipeline.Close()
 	dispatcher := events.NewDispatcher(repo, kafkaPublisher, logger, metrics, cfg.OutboxClaimSize)
 	if dispatcher != nil {

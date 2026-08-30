@@ -36,7 +36,7 @@ func (s *failingSink) StoreEvents(context.Context, []audit.Event) error {
 
 func TestRedactedEventNeverContainsEvidenceOrCredential(t *testing.T) {
 	sink := &memorySink{}
-	pipeline := NewPipeline(1, sink, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	pipeline := NewPipeline(1, sink, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	pipeline.Enqueue(audit.Event{SchemaVersion: "2", TenantID: "tenant-a", Decision: "redact", Matches: []audit.Match{{Evidence: "secret-value"}}, Auditor: &audit.ModelResult{Evidence: "agw.super-secret"}})
 	pipeline.Close()
 	sink.mu.Lock()
@@ -60,7 +60,7 @@ func (s *memorySink) StoreEvents(_ context.Context, events []audit.Event) error 
 func TestPipelineWritesV2Metadata(t *testing.T) {
 	sink := &memorySink{}
 	m := observability.NewMetrics()
-	pipeline := NewPipeline(1, sink, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), m)
+	pipeline := NewPipeline(1, sink, slog.New(slog.NewTextHandler(io.Discard, nil)), m)
 	pipeline.Enqueue(audit.Event{SchemaVersion: "2", EventID: "00000000-0000-0000-0000-000000000001", Direction: audit.DirectionAdmin, Metadata: map[string]string{"operation": "publish"}})
 	pipeline.Close()
 	sink.mu.Lock()
@@ -75,7 +75,7 @@ func TestPipelineWritesV2Metadata(t *testing.T) {
 func TestPipelineReportsFailureUntilPersistenceSucceeds(t *testing.T) {
 	sink := &failingSink{}
 	sink.failing.Store(true)
-	pipeline := NewPipeline(1, sink, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	pipeline := NewPipeline(1, sink, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if !pipeline.Enqueue(audit.Event{EventID: "00000000-0000-0000-0000-000000000001"}) {
 		t.Fatal("first event should enter queue")
 	}
