@@ -149,7 +149,12 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 	if h.identities == nil {
 		return identityUnavailable(c)
 	}
-	requestContext := c.Context()
+	// c.Context() is only safe while the handler runs: fasthttp recycles the
+	// RequestCtx as soon as the response completes, and its Done() channel
+	// signals server shutdown rather than client disconnects. Everything that
+	// outlives the handler uses Background-derived contexts instead, and the
+	// values the streaming goroutine needs are captured explicitly.
+	requestContext := c.UserContext()
 	// Failed gateway key lookups hit PostgreSQL, so repeated invalid keys are
 	// throttled per client address before they can be replayed.
 	if h.authThrottle.blocked(c.IP()) {
@@ -236,6 +241,9 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		}
 	}
 	streamWindows := stream.NewWindows(h.cfg.SSEAuditWindowBytes)
+	// The streaming goroutine outlives the handler, so its context is derived
+	// from the user context (Background unless the embedder sets one) and never
+	// from the fasthttp RequestCtx, which is recycled after the response.
 	streamContext, cancelStream := context.WithCancel(requestContext)
 	terminationCode := ""
 
@@ -293,12 +301,13 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 	}
 
 	// Non-streaming exchanges get the overall request timeout; requests that
-	// ask for streaming are exempt so long-lived SSE sessions survive.
+	// ask for streaming are exempt so long-lived SSE sessions survive. The
+	// cancel function is owned by the streaming goroutine: the handler returns
+	// before the exchange begins, and canceling here would abort it.
 	upstreamCtx := streamContext
+	var cancelTimeout context.CancelFunc
 	if !streamRequested && h.cfg.RequestTimeoutMS > 0 {
-		var cancelTimeout context.CancelFunc
 		upstreamCtx, cancelTimeout = context.WithTimeout(streamContext, time.Duration(h.cfg.RequestTimeoutMS)*time.Millisecond)
-		defer cancelTimeout()
 	}
 
 	// The upstream exchange streams through a pipe so each approved SSE event
@@ -312,10 +321,19 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 	}
 	headerCh := make(chan headerResult, 1)
 	bodyReader, bodyWriter := io.Pipe()
+	var dst io.Writer = bodyWriter
+	if clientStallTimeout > 0 {
+		// fasthttp stops draining the pipe when the client disappears, which
+		// would otherwise block this goroutine on a full pipe forever.
+		dst = &stallWriter{w: bodyWriter, abort: cancelStream, limit: clientStallTimeout}
+	}
 	go func() {
 		defer cancelStream()
+		if cancelTimeout != nil {
+			defer cancelTimeout()
+		}
 		defer bodyWriter.Close()
-		err := h.upstream.Do(upstreamCtx, methodValue, pathValue, queryString, auditBody, reqHeaders, bodyWriter, func(status int, headers http.Header) {
+		err := h.upstream.Do(upstreamCtx, methodValue, pathValue, queryString, auditBody, reqHeaders, dst, func(status int, headers http.Header) {
 			headerCh <- headerResult{status: status, headers: headers}
 		}, inspectNonStream, inspect)
 		if err == nil {
@@ -429,6 +447,39 @@ var errMalformedEncoding = errors.New("malformed compressed request body")
 var errDecodedBodyTooLarge = errors.New("decoded request body exceeds audit limit")
 
 const maxDecodedBodyBytes = 64 << 20
+
+// clientStallTimeout bounds how long the streaming goroutine may stay blocked
+// writing into the response pipe. fasthttp stops draining the pipe when the
+// client connection disappears; without this bound an abandoned stream would
+// pin the goroutine and the upstream connection forever.
+const clientStallTimeout = 10 * time.Minute
+
+// stallWriter aborts the stream when the client stops draining the response
+// pipe for longer than the stall limit: it cancels the stream context and
+// closes the underlying pipe so the blocked write fails.
+type stallWriter struct {
+	w     *io.PipeWriter
+	abort context.CancelFunc
+	limit time.Duration
+}
+
+func (s *stallWriter) Write(p []byte) (int, error) {
+	written := make(chan error, 1)
+	go func() {
+		_, err := s.w.Write(p)
+		written <- err
+	}()
+	select {
+	case err := <-written:
+		return len(p), err
+	case <-time.After(s.limit):
+		s.abort()
+		_ = s.w.CloseWithError(errClientStalled)
+		return 0, errClientStalled
+	}
+}
+
+var errClientStalled = errors.New("client stopped draining the response stream")
 
 func tooLarge(c *fiber.Ctx, message string) error {
 	return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{"error": fiber.Map{"message": message, "type": "request_too_large", "code": "request_too_large"}})
