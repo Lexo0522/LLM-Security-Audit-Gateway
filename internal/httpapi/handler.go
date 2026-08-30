@@ -131,7 +131,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 	// returns the decode-error text as the body, so audit and forwarding both
 	// work from the raw wire bytes in c.Request().Body() instead.
 	if len(c.Request().Body()) > h.cfg.MaxBodyBytes {
-		return blocked(c, "request_too_large", "request body exceeds configured limit")
+		return tooLarge(c, "request body exceeds configured limit")
 	}
 	requestID := c.Get("X-Request-ID")
 	if requestID == "" {
@@ -146,44 +146,54 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 	}
 	input := audit.Input{RequestID: requestID, TenantID: identity.TenantID, APIKeyID: identity.APIKeyID, Direction: audit.DirectionRequest, Path: c.Path(), Model: requestModel(auditBody), Text: normalize.Text(auditBody)}
 	started := time.Now()
-	result, ruleVersion := h.rules.Audit(requestContext, identity.TenantID, input)
-	configured := h.policies.Resolve(identity.TenantID, c.Path(), "request")
-	decision := policy.Elevate(result, policy.Decide(result, configured))
-	h.metrics.Inc("audit_rule_decisions_total", map[string]string{"decision": string(decision), "direction": "request"})
-	if h.cfg.AuditEnabled && decision == policy.Block {
-		h.emit(input, result, ruleVersion, configured, decision, nil, "", started, auditBody)
-		return blocked(c, "policy_blocked", fmt.Sprintf("request blocked by audit policy; risk_score=%d", result.Score))
-	}
+	var (
+		result      audit.Result
+		ruleVersion string
+		configured  policy.Policy
+		decision    = policy.Allow
+	)
 	var modelResult *audit.ModelResult
 	var auditorErr string
-	if h.cfg.AuditEnabled && decision == policy.Monitor && h.cfg.AuditorURL != "" {
-		ctx, cancel := context.WithTimeout(requestContext, time.Duration(h.cfg.AuditorTimeoutMS)*time.Millisecond)
-		res, callErr := h.auditor.Audit(ctx, input)
-		cancel()
-		if callErr != nil {
-			auditorErr = callErr.Error()
-			if configured.AuditorFailureMode == "fail_closed" {
-				h.emit(input, result, ruleVersion, configured, policy.Block, nil, auditorErr, started, auditBody)
-				return blocked(c, "auditor_unavailable", "synchronous auditor unavailable")
-			}
-		} else {
-			modelResult = &res
-			if res.Verdict == "block" || res.Score >= configured.InterventionAt {
-				h.emit(input, result, ruleVersion, configured, policy.Block, modelResult, "", started, auditBody)
-				return blocked(c, "auditor_blocked", "request blocked by model audit")
+	if h.cfg.AuditEnabled {
+		result, ruleVersion = h.rules.Audit(requestContext, identity.TenantID, input)
+		configured = h.policies.Resolve(identity.TenantID, c.Path(), "request")
+		decision = policy.Elevate(result, policy.Decide(result, configured))
+		h.metrics.Inc("audit_rule_decisions_total", map[string]string{"decision": string(decision), "direction": "request"})
+		if decision == policy.Block {
+			h.emit(input, result, ruleVersion, configured, decision, nil, "", started, auditBody)
+			return blocked(c, "policy_blocked", fmt.Sprintf("request blocked by audit policy; risk_score=%d", result.Score))
+		}
+		if decision == policy.Monitor && h.cfg.AuditorURL != "" {
+			ctx, cancel := context.WithTimeout(requestContext, time.Duration(h.cfg.AuditorTimeoutMS)*time.Millisecond)
+			res, callErr := h.auditor.Audit(ctx, input)
+			cancel()
+			if callErr != nil {
+				auditorErr = callErr.Error()
+				if configured.AuditorFailureMode == "fail_closed" {
+					h.emit(input, result, ruleVersion, configured, policy.Block, nil, auditorErr, started, auditBody)
+					return blocked(c, "auditor_unavailable", "synchronous auditor unavailable")
+				}
+			} else {
+				modelResult = &res
+				if res.Verdict == "block" || res.Score >= configured.InterventionAt {
+					h.emit(input, result, ruleVersion, configured, policy.Block, modelResult, "", started, auditBody)
+					return blocked(c, "auditor_blocked", "request blocked by model audit")
+				}
 			}
 		}
+		h.emit(input, result, ruleVersion, configured, decision, modelResult, auditorErr, started, auditBody)
+		if decision == policy.Allow && h.cfg.AuditorURL != "" {
+			go h.shadow(input, result, ruleVersion, configured, auditBody)
+		}
 	}
-	h.emit(input, result, ruleVersion, configured, decision, modelResult, auditorErr, started, auditBody)
-	if h.cfg.AuditEnabled && decision == policy.Allow && h.cfg.AuditorURL != "" {
-		go h.shadow(input, result, ruleVersion, configured, auditBody)
-	}
-	c.Set(fiber.HeaderContentType, c.Get(fiber.HeaderContentType, "application/json"))
 	streamWindows := stream.NewWindows(h.cfg.SSEAuditWindowBytes)
 	streamContext, cancelStream := context.WithCancel(requestContext)
 	defer cancelStream()
 	terminationCode := ""
 	inspect := func(event stream.Event) bool {
+		if !h.cfg.AuditEnabled {
+			return true
+		}
 		for _, fragment := range event.Fragments {
 			responseInput := input
 			responseInput.Direction = audit.DirectionResponse
@@ -208,6 +218,9 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		return true
 	}
 	inspectNonStream := func(chunk []byte) bool {
+		if !h.cfg.AuditEnabled {
+			return true
+		}
 		responseInput := input
 		responseInput.Direction = audit.DirectionResponse
 		responseInput.Text = normalize.Text(chunk)
@@ -236,7 +249,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 			if code == "" {
 				code = "stream_policy_blocked"
 			}
-			if code == "sse_event_too_large" {
+			if code == "sse_event_too_large" && h.cfg.AuditEnabled {
 				responseInput := input
 				responseInput.Direction = audit.DirectionResponse
 				responsePolicy := h.policies.Resolve(identity.TenantID, c.Path(), "response")
@@ -364,10 +377,14 @@ func encodingError(c *fiber.Ctx, err error) error {
 	case errors.Is(err, errUnsupportedEncoding):
 		return c.Status(fiber.StatusUnsupportedMediaType).JSON(fiber.Map{"error": fiber.Map{"message": "request content encoding cannot be audited", "type": "invalid_request_error", "code": "unsupported_content_encoding"}})
 	case errors.Is(err, errDecodedBodyTooLarge):
-		return blocked(c, "request_too_large", "decoded request body exceeds configured limit")
+		return tooLarge(c, "decoded request body exceeds configured limit")
 	default:
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fiber.Map{"message": "request content encoding is malformed", "type": "invalid_request_error", "code": "invalid_content_encoding"}})
 	}
+}
+
+func tooLarge(c *fiber.Ctx, message string) error {
+	return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{"error": fiber.Map{"message": message, "type": "request_too_large", "code": "request_too_large"}})
 }
 func max(a, b int) int {
 	if a > b {

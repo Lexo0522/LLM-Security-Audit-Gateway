@@ -582,3 +582,34 @@ func TestUnsupportedAndMalformedRequestEncodingRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestAuditDisabledProxiesWithoutAuditing(t *testing.T) {
+	needleRule := []rule.Definition{{ID: "needle", Pattern: "needle", Weight: 85, Action: "block"}}
+	registry, err := rule.NewRegistry(nil, needleRule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"needle in stream\"}}]}\n\ndata: [DONE]\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, raw)
+	}))
+	defer upstream.Close()
+	sink := &handlerMemorySink{}
+	pipeline := events.NewPipeline(4, sink, nil, nil)
+	app := fiber.New()
+	New(config.Config{UpstreamURL: upstream.URL, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: false}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a"}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, pipeline).Register(app)
+	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"prompt":"needle"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	pipeline.Close()
+	if response.StatusCode != http.StatusOK || string(body) != raw {
+		t.Fatalf("status=%d body=%q", response.StatusCode, body)
+	}
+	if len(sink.events) != 0 {
+		t.Fatalf("disabled audit must not persist events: %#v", sink.events)
+	}
+}
