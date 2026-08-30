@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 
 type Admin struct {
 	Token         string
+	Logger        *slog.Logger
 	Repo          *storage.Repository
 	Rules         *rule.Registry
 	RuleChanged   func(context.Context, string)
@@ -29,6 +32,25 @@ type Admin struct {
 	Policies      *policy.Resolver
 	PolicyChanged func(context.Context)
 	Audit         AuditReader
+}
+
+// fail logs the underlying cause and returns a client-safe response. Only
+// storage validation messages are shown; anything else returns a generic
+// internal error so database details never reach the caller.
+func (a *Admin) fail(operation string, err error) error {
+	logger := a.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn("admin operation failed", slog.String("operation", operation), slog.Any("error", err))
+	var validation *storage.ValidationError
+	if errors.As(err, &validation) {
+		return fiber.NewError(fiber.StatusBadRequest, validation.Error())
+	}
+	if storage.IsNotFound(err) {
+		return fiber.ErrNotFound
+	}
+	return fiber.ErrInternalServerError
 }
 
 func (a *Admin) Register(app *fiber.App) {
@@ -70,11 +92,11 @@ func (a *Admin) create(c *fiber.Ctx) error {
 		Rules []rule.Definition `json:"rules"`
 	}
 	if err := c.BodyParser(&input); err != nil {
-		return fiber.NewError(400, err.Error())
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 	set, err := a.Repo.CreateRuleSet(c.Context(), input.Scope, input.Rules)
 	if err != nil {
-		return fiber.NewError(400, err.Error())
+		return a.fail("rule_set_create", err)
 	}
 	a.emitOperation(c, "rule_set_create", set.Scope, "success", set.Version)
 	return c.Status(201).JSON(set)
@@ -82,7 +104,7 @@ func (a *Admin) create(c *fiber.Ctx) error {
 func (a *Admin) list(c *fiber.Ctx) error {
 	sets, err := a.Repo.ListRuleSets(c.Context())
 	if err != nil {
-		return err
+		return a.fail("rule_set_list", err)
 	}
 	return c.JSON(sets)
 }
@@ -96,13 +118,13 @@ func (a *Admin) get(c *fiber.Ctx) error {
 func (a *Admin) publish(c *fiber.Ctx) error {
 	set, err := a.Repo.Publish(c.Context(), c.Params("version"))
 	if err != nil {
-		return fiber.NewError(400, err.Error())
+		return a.fail("rule_set_publish", err)
 	}
 	if a.RuleChanged != nil {
 		a.RuleChanged(c.Context(), set.Scope)
 	}
 	if err = a.Rules.Refresh(c.Context(), set.Scope); err != nil {
-		return err
+		return a.fail("rule_set_publish_refresh", err)
 	}
 	a.emitOperation(c, "rule_set_publish", set.Scope, "success", set.Version)
 	return c.JSON(set)
@@ -112,17 +134,17 @@ func (a *Admin) rollback(c *fiber.Ctx) error {
 		Version string `json:"version"`
 	}
 	if err := c.BodyParser(&input); err != nil {
-		return fiber.NewError(400, err.Error())
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 	set, err := a.Repo.Rollback(c.Context(), c.Params("scope"), input.Version)
 	if err != nil {
-		return fiber.NewError(400, err.Error())
+		return a.fail("rule_set_rollback", err)
 	}
 	if a.RuleChanged != nil {
 		a.RuleChanged(c.Context(), set.Scope)
 	}
 	if err = a.Rules.Refresh(c.Context(), set.Scope); err != nil {
-		return err
+		return a.fail("rule_set_rollback_refresh", err)
 	}
 	a.emitOperation(c, "rule_set_rollback", set.Scope, "success", set.Version)
 	return c.JSON(set)
@@ -135,11 +157,14 @@ func (a *Admin) createKey(c *fiber.Ctx) error {
 		TenantID string `json:"tenant_id"`
 	}
 	if err := c.BodyParser(&input); err != nil {
-		return fiber.NewError(400, err.Error())
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	if !auth.ValidTenantID(input.TenantID) {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid tenant_id")
 	}
 	record, key, err := a.Keys.Create(c.Context(), input.TenantID)
 	if err != nil {
-		return fiber.NewError(400, err.Error())
+		return a.fail("api_key_create", err)
 	}
 	a.emitOperation(c, "api_key_create", "tenant:"+record.TenantID, "success", record.ID)
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": record.ID, "tenant_id": record.TenantID, "prefix": record.Prefix, "created_at": record.CreatedAt, "key": key})
@@ -150,7 +175,7 @@ func (a *Admin) listKeys(c *fiber.Ctx) error {
 	}
 	keys, err := a.Keys.List(c.Context(), c.Query("tenant_id"))
 	if err != nil {
-		return fiber.NewError(400, err.Error())
+		return a.fail("api_key_list", err)
 	}
 	return c.JSON(keys)
 }
@@ -160,7 +185,7 @@ func (a *Admin) revokeKey(c *fiber.Ctx) error {
 	}
 	record, found, err := a.Keys.Revoke(c.Context(), c.Params("id"))
 	if err != nil {
-		return fiber.NewError(400, err.Error())
+		return a.fail("api_key_revoke", err)
 	}
 	if !found {
 		return fiber.ErrNotFound
@@ -171,11 +196,11 @@ func (a *Admin) revokeKey(c *fiber.Ctx) error {
 func (a *Admin) createPolicy(c *fiber.Ctx) error {
 	var value policy.Policy
 	if err := c.BodyParser(&value); err != nil {
-		return fiber.NewError(400, err.Error())
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 	created, err := a.Repo.CreatePolicy(c.Context(), value)
 	if err != nil {
-		return fiber.NewError(400, err.Error())
+		return a.fail("policy_create", err)
 	}
 	a.refreshPolicies(c.Context())
 	a.emitOperation(c, "policy_create", created.Scope, "success", created.ID)
@@ -184,18 +209,18 @@ func (a *Admin) createPolicy(c *fiber.Ctx) error {
 func (a *Admin) listPolicies(c *fiber.Ctx) error {
 	values, err := a.Repo.ListPolicies(c.Context())
 	if err != nil {
-		return err
+		return a.fail("policy_list", err)
 	}
 	return c.JSON(values)
 }
 func (a *Admin) updatePolicy(c *fiber.Ctx) error {
 	var value policy.Policy
 	if err := c.BodyParser(&value); err != nil {
-		return fiber.NewError(400, err.Error())
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 	updated, err := a.Repo.UpdatePolicy(c.Context(), c.Params("id"), value)
 	if err != nil {
-		return fiber.NewError(400, err.Error())
+		return a.fail("policy_update", err)
 	}
 	a.refreshPolicies(c.Context())
 	a.emitOperation(c, "policy_update", updated.Scope, "success", updated.ID)
@@ -204,7 +229,7 @@ func (a *Admin) updatePolicy(c *fiber.Ctx) error {
 func (a *Admin) deletePolicy(c *fiber.Ctx) error {
 	deleted, err := a.Repo.DeletePolicy(c.Context(), c.Params("id"))
 	if err != nil {
-		return err
+		return a.fail("policy_delete", err)
 	}
 	if !deleted {
 		return fiber.ErrNotFound

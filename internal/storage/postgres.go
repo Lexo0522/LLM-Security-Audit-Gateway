@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -536,6 +537,16 @@ func truncateError(err error) string {
 	}
 	return value
 }
+
+// ValidationError marks request validation failures whose message is safe to
+// return to admin API callers; everything else stays in the logs.
+type ValidationError struct{ err error }
+
+func (e *ValidationError) Error() string { return e.err.Error() }
+func (e *ValidationError) Unwrap() error { return e.err }
+
+// IsNotFound reports whether err is a PostgreSQL no-rows scan result.
+func IsNotFound(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
 func min(left, right int) int {
 	if left < right {
 		return left
@@ -556,11 +567,14 @@ func nullableRevision(value int64) any {
 }
 func validate(scope string, definitions []rule.Definition) error {
 	if scope != "global" && !strings.HasPrefix(scope, "tenant:") {
-		return fmt.Errorf("scope must be global or tenant:<id>")
+		return &ValidationError{fmt.Errorf("scope must be global or tenant:<id>")}
 	}
 	if len(definitions) == 0 || len(definitions) > 1000 {
-		return fmt.Errorf("rule count must be 1..1000")
+		return &ValidationError{fmt.Errorf("rule count must be 1..1000")}
 	}
 	_, err := rule.New(definitions)
-	return err
+	if err != nil {
+		return &ValidationError{err}
+	}
+	return nil
 }
