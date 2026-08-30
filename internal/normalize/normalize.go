@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+	"unicode"
 
 	"golang.org/x/text/unicode/norm"
 )
@@ -41,6 +42,25 @@ func collect(value any, parts *[]string) {
 }
 
 func normalize(value string) string {
+	value = stripFormatChars(value)
 	value = norm.NFKC.String(value)
 	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+}
+
+// stripFormatChars removes Unicode Cf (format) characters such as zero-width
+// spaces and direction marks. NFKC preserves them, so without this step
+// inserting a zero-width character would split any keyword and evade matching.
+func stripFormatChars(value string) string {
+	isFormat := func(r rune) bool { return unicode.In(r, unicode.Cf) }
+	if !strings.ContainsFunc(value, isFormat) {
+		return value
+	}
+	var builder strings.Builder
+	builder.Grow(len(value))
+	for _, r := range value {
+		if !isFormat(r) {
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
 }

@@ -1,6 +1,9 @@
 package normalize
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTextNormalizesJSONContent(t *testing.T) {
 	got := Text([]byte(`{"messages":[{"role":"user","content":"  IGNORE   Previous Instructions "}]}`))
@@ -21,5 +24,12 @@ func TestTextIsDeterministicAcrossRuns(t *testing.T) {
 		if got := Text(body); got != want {
 			t.Fatalf("nondeterministic normalization: %q vs %q", got, want)
 		}
+	}
+}
+
+func TestTextStripsZeroWidthCharacters(t *testing.T) {
+	got := Text([]byte(`{"content":"ig\u200bno\u200bref\u200f"}`))
+	if !strings.Contains(got, "ignore") {
+		t.Fatalf("zero-width characters must not split keywords: %q", got)
 	}
 }
