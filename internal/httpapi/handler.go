@@ -1,14 +1,22 @@
 package httpapi
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/andybalholm/brotli"
 
 	"github.com/example/ai-audit-gateway/internal/audit"
 	"github.com/example/ai-audit-gateway/internal/auth"
@@ -109,7 +117,10 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		c.Set("Retry-After", fmt.Sprintf("%d", max(1, int(retry.Seconds()))))
 		return c.Status(429).JSON(fiber.Map{"error": fiber.Map{"message": "rate limit exceeded", "type": "rate_limit_error", "code": "rate_limit_exceeded"}})
 	}
-	if len(c.Body()) > h.cfg.MaxBodyBytes {
+	// fiber's ctx.Body() transparently decodes gzip/deflate/brotli and even
+	// returns the decode-error text as the body, so audit and forwarding both
+	// work from the raw wire bytes in c.Request().Body() instead.
+	if len(c.Request().Body()) > h.cfg.MaxBodyBytes {
 		return blocked(c, "request_too_large", "request body exceeds configured limit")
 	}
 	requestID := c.Get("X-Request-ID")
@@ -117,15 +128,20 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		requestID = uuid.NewString()
 	}
 	c.Set("X-Request-ID", requestID)
-	body := append([]byte(nil), c.Body()...)
-	input := audit.Input{RequestID: requestID, TenantID: identity.TenantID, APIKeyID: identity.APIKeyID, Direction: audit.DirectionRequest, Path: c.Path(), Model: requestModel(body), Text: normalize.Text(body)}
+	// The plaintext copy is what rules and the model auditor see and what is
+	// forwarded upstream; wire-level encodings must never reach them encoded.
+	auditBody, decodeErr := decodeAuditedBody(c.Request().Body(), c.Get(fiber.HeaderContentEncoding))
+	if decodeErr != nil {
+		return encodingError(c, decodeErr)
+	}
+	input := audit.Input{RequestID: requestID, TenantID: identity.TenantID, APIKeyID: identity.APIKeyID, Direction: audit.DirectionRequest, Path: c.Path(), Model: requestModel(auditBody), Text: normalize.Text(auditBody)}
 	started := time.Now()
 	result, ruleVersion := h.rules.Audit(requestContext, identity.TenantID, input)
 	configured := h.policies.Resolve(identity.TenantID, c.Path(), "request")
 	decision := policy.Elevate(result, policy.Decide(result, configured))
 	h.metrics.Inc("audit_rule_decisions_total", map[string]string{"decision": string(decision), "direction": "request"})
 	if h.cfg.AuditEnabled && decision == policy.Block {
-		h.emit(input, result, ruleVersion, configured, decision, nil, "", started, body)
+		h.emit(input, result, ruleVersion, configured, decision, nil, "", started, auditBody)
 		return blocked(c, "policy_blocked", fmt.Sprintf("request blocked by audit policy; risk_score=%d", result.Score))
 	}
 	var modelResult *audit.ModelResult
@@ -137,20 +153,20 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		if callErr != nil {
 			auditorErr = callErr.Error()
 			if configured.AuditorFailureMode == "fail_closed" {
-				h.emit(input, result, ruleVersion, configured, policy.Block, nil, auditorErr, started, body)
+				h.emit(input, result, ruleVersion, configured, policy.Block, nil, auditorErr, started, auditBody)
 				return blocked(c, "auditor_unavailable", "synchronous auditor unavailable")
 			}
 		} else {
 			modelResult = &res
 			if res.Verdict == "block" || res.Score >= configured.InterventionAt {
-				h.emit(input, result, ruleVersion, configured, policy.Block, modelResult, "", started, body)
+				h.emit(input, result, ruleVersion, configured, policy.Block, modelResult, "", started, auditBody)
 				return blocked(c, "auditor_blocked", "request blocked by model audit")
 			}
 		}
 	}
-	h.emit(input, result, ruleVersion, configured, decision, modelResult, auditorErr, started, body)
+	h.emit(input, result, ruleVersion, configured, decision, modelResult, auditorErr, started, auditBody)
 	if h.cfg.AuditEnabled && decision == policy.Allow && h.cfg.AuditorURL != "" {
-		go h.shadow(input, result, ruleVersion, configured, body)
+		go h.shadow(input, result, ruleVersion, configured, auditBody)
 	}
 	c.Set(fiber.HeaderContentType, c.Get(fiber.HeaderContentType, "application/json"))
 	streamWindows := stream.NewWindows(h.cfg.SSEAuditWindowBytes)
@@ -195,7 +211,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		}
 		return !h.cfg.AuditEnabled || responseDecision != policy.Block
 	}
-	err = h.upstream.Do(streamContext, c.Method(), c.Path(), body, c.GetReqHeaders(), c.Response().BodyWriter(), func(status int, headers http.Header) {
+	err = h.upstream.Do(streamContext, c.Method(), c.Path(), auditBody, c.GetReqHeaders(), c.Response().BodyWriter(), func(status int, headers http.Header) {
 		copyResponseHeaders(c, headers)
 		c.Status(status)
 	}, inspectNonStream, inspect)
@@ -284,6 +300,64 @@ func requestModel(body []byte) string {
 	}
 	_ = json.Unmarshal(body, &value)
 	return value.Model
+}
+
+const maxDecodedBodyBytes = 64 << 20
+
+var errUnsupportedEncoding = errors.New("unsupported content encoding")
+var errMalformedEncoding = errors.New("malformed compressed request body")
+var errDecodedBodyTooLarge = errors.New("decoded request body exceeds audit limit")
+
+// decodeAuditedBody returns the plaintext form of a request body so rule and
+// model audit run on readable content. The plaintext result is also what gets
+// forwarded upstream, which is why copyHeaders drops Content-Encoding.
+// Unsupported encodings are refused rather than forwarded unaudited.
+func decodeAuditedBody(body []byte, encoding string) ([]byte, error) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity":
+		return append([]byte(nil), body...), nil
+	case "gzip":
+		reader, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, errMalformedEncoding
+		}
+		defer reader.Close()
+		return readBounded(reader)
+	case "deflate":
+		if zlibReader, err := zlib.NewReader(bytes.NewReader(body)); err == nil {
+			defer zlibReader.Close()
+			return readBounded(zlibReader)
+		}
+		flateReader := flate.NewReader(bytes.NewReader(body))
+		defer flateReader.Close()
+		return readBounded(flateReader)
+	case "br", "brotli":
+		return readBounded(brotli.NewReader(bytes.NewReader(body)))
+	default:
+		return nil, errUnsupportedEncoding
+	}
+}
+
+func readBounded(reader io.Reader) ([]byte, error) {
+	decoded, err := io.ReadAll(io.LimitReader(reader, maxDecodedBodyBytes+1))
+	if err != nil {
+		return nil, errMalformedEncoding
+	}
+	if len(decoded) > maxDecodedBodyBytes {
+		return nil, errDecodedBodyTooLarge
+	}
+	return decoded, nil
+}
+
+func encodingError(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, errUnsupportedEncoding):
+		return c.Status(fiber.StatusUnsupportedMediaType).JSON(fiber.Map{"error": fiber.Map{"message": "request content encoding cannot be audited", "type": "invalid_request_error", "code": "unsupported_content_encoding"}})
+	case errors.Is(err, errDecodedBodyTooLarge):
+		return blocked(c, "request_too_large", "decoded request body exceeds configured limit")
+	default:
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fiber.Map{"message": "request content encoding is malformed", "type": "invalid_request_error", "code": "invalid_content_encoding"}})
+	}
 }
 func max(a, b int) int {
 	if a > b {

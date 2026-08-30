@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -54,11 +55,25 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, heade
 		return err
 	}
 	defer resp.Body.Close()
+	// An upstream that gzips without being asked leaves the body unreadable to
+	// the audit path; net/http only auto-decompresses what it negotiated, and
+	// x-gzip is never auto-decompressed, so both need this explicit wrap.
+	respBody := io.Reader(resp.Body)
+	encoding := strings.ToLower(resp.Header.Get("Content-Encoding"))
+	if !resp.Uncompressed && (encoding == "gzip" || encoding == "x-gzip") {
+		gzipReader, gzipErr := gzip.NewReader(resp.Body)
+		if gzipErr != nil {
+			return gzipErr
+		}
+		defer gzipReader.Close()
+		respBody = gzipReader
+		resp.Header.Del("Content-Encoding")
+	}
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 		if onHeaders != nil {
 			onHeaders(resp.StatusCode, resp.Header)
 		}
-		if err := stream.Copy(ctx, dst, resp.Body, c.cfg.SSEMaxEventBytes, inspectSSE); err != nil {
+		if err := stream.Copy(ctx, dst, respBody, c.cfg.SSEMaxEventBytes, inspectSSE); err != nil {
 			if errors.Is(err, stream.ErrInspectionBlocked) {
 				return &InspectionBlockedError{ResponseStarted: true, Code: "stream_policy_blocked"}
 			}
@@ -69,7 +84,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, heade
 		}
 		return nil
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(c.cfg.MaxResponseBytes)+1))
+	data, err := io.ReadAll(io.LimitReader(respBody, int64(c.cfg.MaxResponseBytes)+1))
 	if err != nil {
 		return err
 	}
@@ -89,7 +104,10 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, heade
 func copyHeaders(dst, src http.Header) {
 	for key, values := range src {
 		lower := strings.ToLower(key)
-		if lower == "host" || lower == "content-length" || lower == "authorization" || lower == "x-tenant-id" {
+		// Accept-Encoding is dropped so net/http negotiates a gzip encoding it
+		// will decode itself, keeping the audit path on plaintext. The body is
+		// forwarded in its decoded form, so Content-Encoding would lie about it.
+		if lower == "host" || lower == "content-length" || lower == "authorization" || lower == "x-tenant-id" || lower == "accept-encoding" || lower == "content-encoding" {
 			continue
 		}
 		for _, value := range values {

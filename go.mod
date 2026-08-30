@@ -4,6 +4,7 @@ go 1.24
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.38.1
+	github.com/andybalholm/brotli v1.2.2
 	github.com/gofiber/fiber/v2 v2.52.6
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.4
@@ -14,7 +15,6 @@ require (
 
 require (
 	github.com/ClickHouse/ch-go v0.67.0 // indirect
-	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/go-faster/city v1.0.1 // indirect

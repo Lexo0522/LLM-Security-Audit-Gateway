@@ -1,15 +1,20 @@
 package httpapi
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/andybalholm/brotli"
 
 	"github.com/example/ai-audit-gateway/internal/audit"
 	"github.com/example/ai-audit-gateway/internal/auth"
@@ -452,4 +457,128 @@ type handlerMemorySink struct{ events []audit.Event }
 func (s *handlerMemorySink) StoreEvents(_ context.Context, records []audit.Event) error {
 	s.events = append(s.events, records...)
 	return nil
+}
+
+func gzipBody(t *testing.T, payload string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := gzip.NewWriter(&buffer)
+	if _, err := io.WriteString(writer, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
+
+// serveOnEphemeralPort exercises the real fasthttp server path. fiber's
+// app.Test helper decompresses gzip request bodies (httputil.DumpRequest), so
+// wire-level encoding behavior must be tested against a live listener.
+func serveOnEphemeralPort(t *testing.T, app *fiber.App) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = app.Listener(listener) }()
+	t.Cleanup(func() { _ = app.Shutdown() })
+	return "http://" + listener.Addr().String()
+}
+
+func postGzip(t *testing.T, base, encoding string, body []byte) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer client-key")
+	req.Header.Set("Content-Encoding", encoding)
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	return response
+}
+
+func TestGzipRequestBodyIsAuditedAndBlocked(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	defer upstream.Close()
+	app := fiber.New()
+	testHandler(t, config.Config{UpstreamURL: upstream.URL, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a"}}).Register(app)
+	base := serveOnEphemeralPort(t, app)
+	response := postGzip(t, base, "gzip", gzipBody(t, `{"messages":[{"role":"user","content":"needle hidden in gzip"}]}`))
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d", response.StatusCode)
+	}
+	if called {
+		t.Fatal("blocked gzip request must not reach upstream")
+	}
+}
+
+func TestGzipRequestBodyForwardedDecoded(t *testing.T) {
+	plaintext := `{"messages":[{"role":"user","content":"hello"}]}`
+	var gotEncoding string
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEncoding = r.Header.Get("Content-Encoding")
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	app := fiber.New()
+	testHandler(t, config.Config{UpstreamURL: upstream.URL, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a"}}).Register(app)
+	base := serveOnEphemeralPort(t, app)
+	response := postGzip(t, base, "gzip", gzipBody(t, plaintext))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", response.StatusCode)
+	}
+	if gotEncoding != "" || string(gotBody) != plaintext {
+		t.Fatalf("upstream must receive decoded plaintext: encoding=%q body=%q", gotEncoding, gotBody)
+	}
+}
+
+func TestBrotliRequestBodyIsAuditedAndBlocked(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	defer upstream.Close()
+	app := fiber.New()
+	testHandler(t, config.Config{UpstreamURL: upstream.URL, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a"}}).Register(app)
+	base := serveOnEphemeralPort(t, app)
+	var buffer bytes.Buffer
+	writer := brotli.NewWriter(&buffer)
+	_, _ = io.WriteString(writer, `{"messages":[{"role":"user","content":"needle in brotli"}]}`)
+	_ = writer.Close()
+	response := postGzip(t, base, "br", buffer.Bytes())
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d", response.StatusCode)
+	}
+	if called {
+		t.Fatal("blocked brotli request must not reach upstream")
+	}
+}
+
+func TestUnsupportedAndMalformedRequestEncodingRejected(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer upstream.Close()
+	app := fiber.New()
+	testHandler(t, config.Config{UpstreamURL: upstream.URL, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a"}}).Register(app)
+	base := serveOnEphemeralPort(t, app)
+	for name, request := range map[string]struct {
+		body     []byte
+		encoding string
+		status   int
+	}{
+		"zstd":      {body: []byte("raw"), encoding: "zstd", status: http.StatusUnsupportedMediaType},
+		"malformed": {body: []byte("not gzip"), encoding: "gzip", status: http.StatusBadRequest},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := postGzip(t, base, request.encoding, request.body)
+			if response.StatusCode != request.status {
+				t.Fatalf("status=%d want=%d", response.StatusCode, request.status)
+			}
+		})
+	}
 }

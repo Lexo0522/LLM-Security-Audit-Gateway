@@ -122,7 +122,7 @@ func (s *fakeSource) MarkOutboxPublished(_ context.Context, eventID string) erro
 	s.published = append(s.published, eventID)
 	return nil
 }
-func (s *fakeSource) OutboxPending(context.Context) (int64, error)  { return s.pending, nil }
+func (s *fakeSource) OutboxPending(context.Context) (int64, error)     { return s.pending, nil }
 func (s *fakeSource) OutboxPoison(context.Context, int) (int64, error) { return s.poison, nil }
 
 type fakePublisher struct {

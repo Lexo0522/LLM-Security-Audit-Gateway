@@ -473,6 +473,7 @@ func (r *Repository) StoreEvents(ctx context.Context, events []audit.Event) erro
 	}
 	return tx.Commit(ctx)
 }
+
 // MaxOutboxAttempts bounds delivery retries. ClaimOutbox never hands out rows
 // at or above this count; they stay visible through OutboxPoison for alerting
 // instead of blocking the dispatch queue forever.

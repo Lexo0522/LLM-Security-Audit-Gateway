@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
@@ -69,5 +70,60 @@ func TestNonSSEInspectionRunsBeforeHeadersAndBody(t *testing.T) {
 	}, nil)
 	if err != nil || !inspected || !headersStarted || destination.String() != `{"ok":true}` {
 		t.Fatalf("err=%v inspected=%v headers=%v destination=%q", err, inspected, headersStarted, destination.String())
+	}
+}
+
+func TestCopyHeadersStripsAcceptEncoding(t *testing.T) {
+	source := http.Header{"Accept-Encoding": []string{"br"}}
+	destination := http.Header{}
+	copyHeaders(destination, source)
+	if destination.Get("Accept-Encoding") != "" {
+		t.Fatal("client accept-encoding must not reach upstream")
+	}
+}
+
+func TestClientAcceptEncodingNeverReachesUpstream(t *testing.T) {
+	var gotAcceptEncoding string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAcceptEncoding = r.Header.Get("Accept-Encoding")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	client := New(config.Config{UpstreamURL: upstream.URL, RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
+	headers := http.Header{}
+	headers.Set("Accept-Encoding", "br")
+	var destination bytes.Buffer
+	if err := client.Do(context.Background(), http.MethodPost, "/v1/chat/completions", nil, headers, &destination, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if gotAcceptEncoding != "gzip" {
+		t.Fatalf("upstream accept-encoding=%q, want transport-negotiated gzip", gotAcceptEncoding)
+	}
+}
+
+func TestUnsolicitedGzipResponseIsDecompressedForAudit(t *testing.T) {
+	plain := `{"ok":true}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "x-gzip")
+		gzipWriter := gzip.NewWriter(w)
+		_, _ = io.WriteString(gzipWriter, plain)
+		_ = gzipWriter.Close()
+	}))
+	defer upstream.Close()
+	client := New(config.Config{UpstreamURL: upstream.URL, RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
+	var destination bytes.Buffer
+	var forwarded http.Header
+	err := client.Do(context.Background(), http.MethodPost, "/v1/chat/completions", nil, nil, &destination, func(_ int, headers http.Header) {
+		forwarded = headers
+	}, func([]byte) bool { return true }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if destination.String() != plain {
+		t.Fatalf("decompressed body mismatch: %q", destination.String())
+	}
+	if forwarded.Get("Content-Encoding") != "" {
+		t.Fatalf("content-encoding must be dropped after decompression: %v", forwarded)
 	}
 }
