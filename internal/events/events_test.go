@@ -124,6 +124,7 @@ func (s *fakeSource) MarkOutboxPublished(_ context.Context, eventIDs []string) e
 }
 func (s *fakeSource) OutboxPending(context.Context) (int64, error)     { return s.pending, nil }
 func (s *fakeSource) OutboxPoison(context.Context, int) (int64, error) { return s.poison, nil }
+func (s *fakeSource) OutboxOldest(context.Context) (time.Time, error)  { return time.Time{}, nil }
 
 type fakePublisher struct {
 	fail   bool

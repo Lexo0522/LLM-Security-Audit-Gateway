@@ -26,6 +26,32 @@ groups:
         for: 15m
         labels: { severity: critical }
         annotations: { summary: "Audit outbox contains poison events that exceed the delivery retry cap" }
+      - alert: AuditOutboxStalled
+        expr: audit_outbox_oldest_age_seconds > 600
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: "The oldest undelivered audit outbox row is over 10 minutes old" }
+      - alert: AuditConsumerLag
+        expr: audit_kafka_consumer_lag > 1000
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "ClickHouse audit consumer is falling behind the Kafka topic" }
+      - alert: AuditDLQTraffic
+        expr: increase(audit_clickhouse_consumer_dlq_total{result="success"}[15m]) > 0
+        labels: { severity: warning }
+        annotations: { summary: "Invalid audit events reached the dead-letter queue" }
+      - alert: AuditKafkaPublishErrors
+        expr: increase(audit_kafka_events_total{result="error"}[5m]) > 10
+        labels: { severity: warning }
+        annotations: { summary: "Kafka audit delivery is failing repeatedly" }
+      - alert: AuditClickHouseInsertErrors
+        expr: increase(audit_clickhouse_consumer_inserts_total{result="error"}[5m]) > 0
+        labels: { severity: critical }
+        annotations: { summary: "ClickHouse audit inserts are failing" }
+      - alert: AuditAuditorCircuitOpened
+        expr: increase(audit_auditor_circuit_open_total[15m]) > 0
+        labels: { severity: warning }
+        annotations: { summary: "The model auditor circuit breaker opened" }
       - alert: AuditRedisLocalFallback
         expr: audit_redis_limiter_degraded == 1
         for: 5m

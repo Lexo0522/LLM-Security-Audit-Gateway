@@ -32,6 +32,7 @@ type Source interface {
 	MarkOutboxPublished(ctx context.Context, eventIDs []string) error
 	OutboxPending(ctx context.Context) (int64, error)
 	OutboxPoison(ctx context.Context, maxAttempts int) (int64, error)
+	OutboxOldest(ctx context.Context) (time.Time, error)
 }
 
 type KafkaPublisher struct {
@@ -226,6 +227,7 @@ func (p *Pipeline) run() {
 }
 func (p *Pipeline) storeOnce(batch []audit.Event) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	started := time.Now()
 	err := error(nil)
 	if p.sink == nil {
 		err = fmt.Errorf("audit persistence disabled")
@@ -233,6 +235,7 @@ func (p *Pipeline) storeOnce(batch []audit.Event) bool {
 		err = p.sink.StoreEvents(ctx, batch)
 	}
 	cancel()
+	p.metrics.Observe("audit_postgres_batch_duration_seconds", time.Since(started).Seconds(), nil)
 	p.mu.Lock()
 	if err != nil {
 		p.lastErr = err.Error()
@@ -331,12 +334,14 @@ func (d *Dispatcher) Close() {
 	_ = d.publisher.Close()
 }
 func (d *Dispatcher) dispatch(ctx context.Context) int {
+	startedDispatch := time.Now()
 	claimCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	records, err := d.source.ClaimOutbox(claimCtx, d.claimSize, 30*time.Second)
 	cancel()
 	if err != nil {
 		d.logger.Warn("audit outbox claim failed", slog.Any("error", err))
 		d.metrics.Inc("audit_outbox_claims_total", map[string]string{"result": "error"})
+		d.metrics.Observe("audit_outbox_dispatch_duration_seconds", time.Since(startedDispatch).Seconds(), nil)
 		return 0
 	}
 	published := make([]string, 0, len(records))
@@ -365,6 +370,12 @@ func (d *Dispatcher) dispatch(ctx context.Context) int {
 	if poison, err := d.source.OutboxPoison(ctx, storage.MaxOutboxAttempts); err == nil {
 		d.metrics.Set("audit_outbox_poison", float64(poison), nil)
 	}
+	if oldest, err := d.source.OutboxOldest(ctx); err == nil && !oldest.IsZero() {
+		// A small backlog stuck for an hour is worse than a large fresh one;
+		// age makes stalled delivery visible regardless of count.
+		d.metrics.Set("audit_outbox_oldest_age_seconds", time.Since(oldest).Seconds(), nil)
+	}
+	d.metrics.Observe("audit_outbox_dispatch_duration_seconds", time.Since(startedDispatch).Seconds(), nil)
 	return len(records)
 }
 

@@ -69,6 +69,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 	if err := c.ensureSchema(ctx); err != nil {
 		return err
 	}
+	go c.sampleStats(ctx)
 	for {
 		message, err := c.reader.FetchMessage(ctx)
 		if err != nil {
@@ -136,6 +137,24 @@ func (c *Consumer) Run(ctx context.Context) error {
 		c.metrics.Inc("audit_clickhouse_consumer_commits_total", map[string]string{"result": "success"})
 	}
 }
+// sampleStats surfaces reader lag, rebalances, and fetch errors as gauges; lag
+// is the primary signal that the ClickHouse pipeline is falling behind.
+func (c *Consumer) sampleStats(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			stats := c.reader.Stats()
+			c.metrics.Set("audit_kafka_consumer_lag", float64(stats.Lag), nil)
+			c.metrics.Set("audit_kafka_consumer_rebalances", float64(stats.Rebalances), nil)
+			c.metrics.Set("audit_kafka_consumer_fetch_errors", float64(stats.Errors), nil)
+		}
+	}
+}
+
 func (c *Consumer) ensureSchema(ctx context.Context) error {
 	for {
 		probe, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -154,11 +173,18 @@ func (c *Consumer) ensureSchema(ctx context.Context) error {
 		}
 	}
 }
+// maxInsertAttempts bounds ClickHouse insert retries; exceeding it returns an
+// error so the process exits and the supervisor restarts consumption from the
+// last committed offset instead of spinning forever on a broken destination.
+const maxInsertAttempts = 10
+
 func (c *Consumer) insertWithRetry(ctx context.Context, events []audit.Event) error {
-	for {
+	for attempt := 1; ; attempt++ {
+		started := time.Now()
 		insertCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		err := c.store.InsertEvents(insertCtx, events)
 		cancel()
+		c.metrics.Observe("audit_clickhouse_insert_duration_seconds", time.Since(started).Seconds(), nil)
 		if err == nil {
 			return nil
 		}
@@ -167,6 +193,9 @@ func (c *Consumer) insertWithRetry(ctx context.Context, events []audit.Event) er
 		}
 		c.metrics.Inc("audit_clickhouse_consumer_inserts_total", map[string]string{"result": "error"})
 		c.logger.Warn("write clickhouse audit events", slog.Any("error", err))
+		if attempt >= maxInsertAttempts {
+			return fmt.Errorf("clickhouse insert failed after %d attempts: %w", attempt, err)
+		}
 		if !wait(ctx, time.Second) {
 			return ctx.Err()
 		}

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -560,6 +561,14 @@ func (r *Repository) OutboxPoison(ctx context.Context, maxAttempts int) (int64, 
 	var count int64
 	err := r.pool.QueryRow(ctx, `SELECT count(*) FROM audit_outbox WHERE published_at IS NULL AND attempts >= $1`, maxAttempts).Scan(&count)
 	return count, err
+}
+func (r *Repository) OutboxOldest(ctx context.Context) (time.Time, error) {
+	var oldest sql.NullTime
+	err := r.pool.QueryRow(ctx, `SELECT min(created_at) FROM audit_outbox WHERE published_at IS NULL`).Scan(&oldest)
+	if err != nil || !oldest.Valid {
+		return time.Time{}, err
+	}
+	return oldest.Time, nil
 }
 func truncateError(err error) string {
 	if err == nil {
