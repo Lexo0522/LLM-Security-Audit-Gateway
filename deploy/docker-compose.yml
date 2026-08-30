@@ -38,6 +38,11 @@ services:
     entrypoint: ["/audit-consumer"]
     expose:
       - "9090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9090/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
     environment:
       KAFKA_BROKERS: "kafka:9092"
       KAFKA_AUDIT_TOPIC: "${KAFKA_AUDIT_TOPIC:-audit.events}"
@@ -51,7 +56,9 @@ services:
     restart: unless-stopped
 
   newapi:
-    image: calciumion/new-api:latest
+    # Pinned instead of latest so development and production upgrades are a
+    # deliberate change; bump the tag after reviewing release notes.
+    image: calciumion/new-api:v0.13.2
     expose:
       - "3000"
     restart: unless-stopped

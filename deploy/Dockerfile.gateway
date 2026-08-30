@@ -1,5 +1,8 @@
 FROM golang:1.25-alpine AS build
-ARG GOPROXY=https://goproxy.cn,direct
+# Override at build time (e.g. --build-arg GOPROXY=https://goproxy.cn,direct)
+# when the default module proxy is unreachable; module integrity is still
+# enforced by go.sum verification.
+ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=$GOPROXY
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -9,10 +12,16 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/gateway ./cmd/gate
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/audit-consumer ./cmd/audit-consumer
 
 FROM alpine:3.21
-RUN adduser -D -H gateway
+# ca-certificates: upstream, auditor, and ClickHouse may use HTTPS.
+# tzdata: audit event timestamps render with local time zones.
+RUN adduser -D -H gateway \
+	&& apk add --no-cache ca-certificates tzdata
 USER gateway
 COPY --from=build /out/gateway /gateway
 COPY --from=build /out/audit-consumer /audit-consumer
 EXPOSE 8080
 EXPOSE 9090
+# Default probe targets the gateway listener; the audit-consumer service
+# overrides this in docker-compose.yml with its own port.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
 ENTRYPOINT ["/gateway"]

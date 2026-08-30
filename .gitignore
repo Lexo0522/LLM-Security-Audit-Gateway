@@ -1,3 +1,5 @@
 CLAUDE.md
 /.cache/
 /.zcode/
+.env
+.env.*
