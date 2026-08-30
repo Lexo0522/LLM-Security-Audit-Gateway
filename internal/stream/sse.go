@@ -137,24 +137,18 @@ func parseEvent(raw []byte) *Event {
 
 // ExtractFragments extracts only documented OpenAI streaming content fields.
 // Unknown JSON is intentionally ignored so the proxy stays wire-compatible.
+// Chat and Responses shapes are decoded in a single pass; delta is a
+// RawMessage because chat carries it as an object while Responses carries it
+// as a string.
 func ExtractFragments(data []byte) []Fragment {
-	var responseEvent struct {
-		Type         string `json:"type"`
-		ItemID       string `json:"item_id"`
-		OutputIndex  *int   `json:"output_index"`
-		ContentIndex *int   `json:"content_index"`
-		SummaryIndex *int   `json:"summary_index"`
-		Delta        string `json:"delta"`
-	}
-	if err := json.Unmarshal(data, &responseEvent); err != nil {
-		return nil
-	}
-	if responseEvent.Type != "" {
-		return responseFragments(responseEvent.Type, responseEvent.ItemID, responseEvent.OutputIndex, responseEvent.ContentIndex, responseEvent.SummaryIndex, responseEvent.Delta)
-	}
-
-	var payload struct {
-		Choices []struct {
+	var combined struct {
+		Type         string          `json:"type"`
+		ItemID       string          `json:"item_id"`
+		OutputIndex  *int            `json:"output_index"`
+		ContentIndex *int            `json:"content_index"`
+		SummaryIndex *int            `json:"summary_index"`
+		Delta        json.RawMessage `json:"delta"`
+		Choices      []struct {
 			Index *int   `json:"index"`
 			Text  string `json:"text"`
 			Delta struct {
@@ -171,11 +165,15 @@ func ExtractFragments(data []byte) []Fragment {
 			} `json:"delta"`
 		} `json:"choices"`
 	}
-	if err := json.Unmarshal(data, &payload); err != nil {
+	if err := json.Unmarshal(data, &combined); err != nil {
 		return nil
 	}
+	if combined.Type != "" {
+		delta := rawString(combined.Delta)
+		return responseFragments(combined.Type, combined.ItemID, combined.OutputIndex, combined.ContentIndex, combined.SummaryIndex, delta)
+	}
 	fragments := make([]Fragment, 0)
-	for choicePosition, choice := range payload.Choices {
+	for choicePosition, choice := range combined.Choices {
 		choiceIndex := choicePosition
 		if choice.Index != nil {
 			choiceIndex = *choice.Index
@@ -204,6 +202,18 @@ func ExtractFragments(data []byte) []Fragment {
 		}
 	}
 	return fragments
+}
+
+// rawString decodes a JSON string value that was captured as RawMessage.
+func rawString(raw json.RawMessage) string {
+	if len(raw) == 0 || raw[0] != '"' {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
 }
 
 // responseFragments extracts the text-bearing incremental events documented by
@@ -271,6 +281,7 @@ func (w *Windows) Feed(channel string, chunk []byte) []byte {
 type Scanner struct {
 	tail   []byte
 	window int
+	buf    []byte
 }
 
 func NewScanner(window int) *Scanner {
@@ -280,14 +291,19 @@ func NewScanner(window int) *Scanner {
 	return &Scanner{window: window}
 }
 
+// Feed appends the chunk to the rolling window and returns the window text.
+// The returned slice aliases an internal buffer and stays valid only until the
+// next Feed call on the same Scanner; callers must consume it immediately.
 func (s *Scanner) Feed(chunk []byte) []byte {
-	data := append(append([]byte{}, s.tail...), chunk...)
-	if len(data) > s.window {
-		s.tail = append([]byte{}, data[len(data)-s.window:]...)
+	combined := append(s.buf[:0], s.tail...)
+	combined = append(combined, chunk...)
+	if len(combined) > s.window {
+		s.tail = append(s.tail[:0], combined[len(combined)-s.window:]...)
 	} else {
-		s.tail = append([]byte{}, data...)
+		s.tail = append(s.tail[:0], combined...)
 	}
-	return data
+	s.buf = combined
+	return combined
 }
 
 func SecurityTermination(code, requestID string) []byte {
