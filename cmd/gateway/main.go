@@ -35,8 +35,12 @@ func (l managedRuleLoader) ActiveDefinitions(ctx context.Context, scope string) 
 }
 
 func main() {
-	cfg := config.Load()
 	logger := observability.Logger()
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Error("invalid gateway configuration", slog.Any("error", err))
+		return
+	}
 	if err := cfg.Validate(); err != nil {
 		logger.Error("invalid gateway configuration", slog.Any("error", err))
 		return

@@ -17,7 +17,12 @@ import (
 )
 
 func main() {
-	cfg, logger, metrics := config.Load(), observability.Logger(), observability.NewMetrics()
+	logger, metrics := observability.Logger(), observability.NewMetrics()
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Error("invalid audit consumer configuration", slog.Any("error", err))
+		return
+	}
 	if cfg.ClickHouseDSN == "" || len(cfg.KafkaBrokers) == 0 {
 		logger.Error("CLICKHOUSE_DSN and KAFKA_BROKERS are required for audit consumer")
 		return

@@ -34,7 +34,10 @@ func main() {
 	if err = json.Unmarshal(raw, &value); err != nil {
 		fail("parse seed file: %v", err)
 	}
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		fail("invalid configuration: %v", err)
+	}
 	if cfg.PostgresURL == "" {
 		fail("POSTGRES_URL is required")
 	}

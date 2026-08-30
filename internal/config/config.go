@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -43,19 +44,37 @@ type Config struct {
 	SnapshotRefreshIntervalMS int
 }
 
-func Load() Config {
-	return Config{
+func Load() (Config, error) {
+	// Security switches must fail startup instead of silently falling back to
+	// the default on a typo: AUDIT_FAIL_CLOSED=yes must not degrade into
+	// fail-open. Every malformed numeric or boolean value is collected here.
+	var errs []error
+	boolOpt := func(key string, fallback bool) bool {
+		value, err := envBool(key, fallback)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		return value
+	}
+	intOpt := func(key string, fallback int) int {
+		value, err := envInt(key, fallback)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		return value
+	}
+	cfg := Config{
 		Environment:               env("GATEWAY_ENV", "production"),
-		AllowDemoBootstrap:        envBool("ALLOW_DEMO_BOOTSTRAP_RULES", false),
+		AllowDemoBootstrap:        boolOpt("ALLOW_DEMO_BOOTSTRAP_RULES", false),
 		ListenAddr:                env("GATEWAY_LISTEN_ADDR", ":8080"),
 		AdminAddr:                 env("GATEWAY_ADMIN_ADDR", ":8081"),
 		UpstreamURL:               strings.TrimRight(env("NEWAPI_BASE_URL", "http://newapi:3000"), "/"),
 		UpstreamAPIKey:            os.Getenv("NEWAPI_API_KEY"),
-		MaxBodyBytes:              envInt("MAX_BODY_BYTES", 4<<20),
-		MaxResponseBytes:          envInt("MAX_RESPONSE_BYTES", 16<<20),
-		RequestTimeoutMS:          envInt("REQUEST_TIMEOUT_MS", 120000),
-		AuditEnabled:              envBool("AUDIT_ENABLED", true),
-		FailClosed:                envBool("AUDIT_FAIL_CLOSED", false),
+		MaxBodyBytes:              intOpt("MAX_BODY_BYTES", 4<<20),
+		MaxResponseBytes:          intOpt("MAX_RESPONSE_BYTES", 16<<20),
+		RequestTimeoutMS:          intOpt("REQUEST_TIMEOUT_MS", 120000),
+		AuditEnabled:              boolOpt("AUDIT_ENABLED", true),
+		FailClosed:                boolOpt("AUDIT_FAIL_CLOSED", false),
 		PostgresURL:               os.Getenv("POSTGRES_URL"),
 		RedisURL:                  os.Getenv("REDIS_URL"),
 		KafkaBrokers:              envList("KAFKA_BROKERS"),
@@ -65,20 +84,24 @@ func Load() Config {
 		ClickHouseDSN:             os.Getenv("CLICKHOUSE_DSN"),
 		ConsumerListenAddr:        env("AUDIT_CONSUMER_LISTEN_ADDR", ":9090"),
 		AdminToken:                os.Getenv("ADMIN_API_TOKEN"),
-		RateLimitRPS:              envInt("RATE_LIMIT_RPS", 60),
-		RateLimitBurst:            envInt("RATE_LIMIT_BURST", 120),
+		RateLimitRPS:              intOpt("RATE_LIMIT_RPS", 60),
+		RateLimitBurst:            intOpt("RATE_LIMIT_BURST", 120),
 		AuditorURL:                os.Getenv("AUDITOR_URL"),
 		AuditorModel:              env("AUDITOR_MODEL", "http-auditor"),
-		AuditorTimeoutMS:          envInt("AUDITOR_TIMEOUT_MS", 350),
-		AuditorConcurrency:        envInt("AUDITOR_CONCURRENCY", 8),
-		EventQueueSize:            envInt("AUDIT_EVENT_QUEUE_SIZE", 1000),
+		AuditorTimeoutMS:          intOpt("AUDITOR_TIMEOUT_MS", 350),
+		AuditorConcurrency:        intOpt("AUDITOR_CONCURRENCY", 8),
+		EventQueueSize:            intOpt("AUDIT_EVENT_QUEUE_SIZE", 1000),
 		APIKeyPepper:              os.Getenv("GATEWAY_API_KEY_PEPPER"),
-		SSEAuditWindowBytes:       envInt("SSE_AUDIT_WINDOW_BYTES", 16<<10),
-		SSEMaxEventBytes:          envInt("SSE_MAX_EVENT_BYTES", 256<<10),
-		HealthProbeIntervalMS:     envInt("HEALTH_PROBE_INTERVAL_MS", 5000),
-		HealthProbeTimeoutMS:      envInt("HEALTH_PROBE_TIMEOUT_MS", 750),
-		SnapshotRefreshIntervalMS: envInt("SNAPSHOT_REFRESH_INTERVAL_MS", 30000),
+		SSEAuditWindowBytes:       intOpt("SSE_AUDIT_WINDOW_BYTES", 16<<10),
+		SSEMaxEventBytes:          intOpt("SSE_MAX_EVENT_BYTES", 256<<10),
+		HealthProbeIntervalMS:     intOpt("HEALTH_PROBE_INTERVAL_MS", 5000),
+		HealthProbeTimeoutMS:      intOpt("HEALTH_PROBE_TIMEOUT_MS", 750),
+		SnapshotRefreshIntervalMS: intOpt("SNAPSHOT_REFRESH_INTERVAL_MS", 30000),
 	}
+	if len(errs) > 0 {
+		return Config{}, errors.Join(errs...)
+	}
+	return cfg, nil
 }
 
 func (c Config) Validate() error {
@@ -96,6 +119,9 @@ func (c Config) Validate() error {
 	}
 	if c.PostgresURL == "" {
 		return fmt.Errorf("POSTGRES_URL is required for gateway API key authentication")
+	}
+	if c.AdminToken != "" && c.Environment == "production" && (len(c.AdminToken) < 24 || strings.EqualFold(c.AdminToken, "change-me")) {
+		return fmt.Errorf("ADMIN_API_TOKEN must be at least 24 characters and not a placeholder in production")
 	}
 	return nil
 }
@@ -122,18 +148,26 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func envInt(key string, fallback int) int {
-	value, err := strconv.Atoi(os.Getenv(key))
-	if err != nil || value <= 0 {
-		return fallback
+func envInt(key string, fallback int) (int, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
 	}
-	return value
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer, got %q", key, raw)
+	}
+	return value, nil
 }
 
-func envBool(key string, fallback bool) bool {
-	value, err := strconv.ParseBool(os.Getenv(key))
-	if err != nil {
-		return fallback
+func envBool(key string, fallback bool) (bool, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
 	}
-	return value
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean (true/false), got %q", key, raw)
+	}
+	return value, nil
 }

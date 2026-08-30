@@ -169,7 +169,9 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 			cancel()
 			if callErr != nil {
 				auditorErr = callErr.Error()
-				if configured.AuditorFailureMode == "fail_closed" {
+				// AUDIT_FAIL_CLOSED is the deployment-wide override; policies can
+				// tighten it per scope but cannot relax it.
+				if configured.AuditorFailureMode == "fail_closed" || h.cfg.FailClosed {
 					h.emit(input, result, ruleVersion, configured, policy.Block, nil, auditorErr, started, auditBody)
 					return blocked(c, "auditor_unavailable", "synchronous auditor unavailable")
 				}
