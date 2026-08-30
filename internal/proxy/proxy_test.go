@@ -33,7 +33,7 @@ func TestSSEBlockReportsStartedResponseAndDoesNotWriteMatchedEvent(t *testing.T)
 	client := New(config.Config{UpstreamURL: upstream.URL, RequestTimeoutMS: 1000})
 	var destination bytes.Buffer
 	headerCalls := 0
-	err := client.Do(context.Background(), http.MethodPost, "/v1/chat/completions", nil, nil, &destination, func(int, http.Header) {
+	err := client.Do(context.Background(), http.MethodPost, "/v1/chat/completions", "", nil, nil, &destination, func(int, http.Header) {
 		headerCalls++
 	}, nil, func(stream.Event) bool { return false })
 	var blocked *InspectionBlockedError
@@ -56,7 +56,7 @@ func TestNonSSEInspectionRunsBeforeHeadersAndBody(t *testing.T) {
 	var destination bytes.Buffer
 	inspected := false
 	headersStarted := false
-	err := client.Do(context.Background(), http.MethodPost, "/v1/chat/completions", nil, nil, &destination, func(status int, headers http.Header) {
+	err := client.Do(context.Background(), http.MethodPost, "/v1/chat/completions", "", nil, nil, &destination, func(status int, headers http.Header) {
 		headersStarted = true
 		if status != http.StatusCreated || headers.Get("Content-Type") != "application/json" {
 			t.Fatalf("headers status=%d headers=%v", status, headers)
@@ -93,7 +93,7 @@ func TestClientAcceptEncodingNeverReachesUpstream(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("Accept-Encoding", "br")
 	var destination bytes.Buffer
-	if err := client.Do(context.Background(), http.MethodPost, "/v1/chat/completions", nil, headers, &destination, nil, nil, nil); err != nil {
+	if err := client.Do(context.Background(), http.MethodPost, "/v1/chat/completions", "", nil, headers, &destination, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if gotAcceptEncoding != "gzip" {
@@ -114,7 +114,7 @@ func TestUnsolicitedGzipResponseIsDecompressedForAudit(t *testing.T) {
 	client := New(config.Config{UpstreamURL: upstream.URL, RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
 	var destination bytes.Buffer
 	var forwarded http.Header
-	err := client.Do(context.Background(), http.MethodPost, "/v1/chat/completions", nil, nil, &destination, func(_ int, headers http.Header) {
+	err := client.Do(context.Background(), http.MethodPost, "/v1/chat/completions", "", nil, nil, &destination, func(_ int, headers http.Header) {
 		forwarded = headers
 	}, func([]byte) bool { return true }, nil)
 	if err != nil {
@@ -125,5 +125,22 @@ func TestUnsolicitedGzipResponseIsDecompressedForAudit(t *testing.T) {
 	}
 	if forwarded.Get("Content-Encoding") != "" {
 		t.Fatalf("content-encoding must be dropped after decompression: %v", forwarded)
+	}
+}
+
+func TestQueryStringsAreForwardedUpstream(t *testing.T) {
+	var gotPath, gotQuery string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	client := New(config.Config{UpstreamURL: upstream.URL, RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
+	var destination bytes.Buffer
+	if err := client.Do(context.Background(), http.MethodPost, "/v1/chat/completions", "api-version=2024-01&user=alice", nil, nil, &destination, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/v1/chat/completions" || gotQuery != "api-version=2024-01&user=alice" {
+		t.Fatalf("path=%q query=%q", gotPath, gotQuery)
 	}
 }

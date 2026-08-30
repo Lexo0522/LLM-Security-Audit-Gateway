@@ -37,10 +37,18 @@ func New(cfg config.Config) *Client {
 // Do forwards a request to the configured upstream. Non-SSE responses are
 // inspected as one bounded body, while SSE responses are inspected as complete
 // events before each event is written to the client.
-func (c *Client) Do(ctx context.Context, method, path string, body []byte, headers http.Header, dst io.Writer, onHeaders func(int, http.Header), inspectResponse func([]byte) bool, inspectSSE stream.Inspector) error {
+func (c *Client) Do(ctx context.Context, method, path, query string, body []byte, headers http.Header, dst io.Writer, onHeaders func(int, http.Header), inspectResponse func([]byte) bool, inspectSSE stream.Inspector) error {
 	target, err := url.JoinPath(c.cfg.UpstreamURL, path)
 	if err != nil {
 		return err
+	}
+	if query != "" {
+		parsed, parseErr := url.Parse(target)
+		if parseErr != nil {
+			return parseErr
+		}
+		parsed.RawQuery = query
+		target = parsed.String()
 	}
 	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {

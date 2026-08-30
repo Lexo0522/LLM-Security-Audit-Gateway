@@ -211,7 +211,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		}
 		return !h.cfg.AuditEnabled || responseDecision != policy.Block
 	}
-	err = h.upstream.Do(streamContext, c.Method(), c.Path(), auditBody, c.GetReqHeaders(), c.Response().BodyWriter(), func(status int, headers http.Header) {
+	err = h.upstream.Do(streamContext, c.Method(), c.Path(), string(c.Request().URI().QueryString()), auditBody, c.GetReqHeaders(), c.Response().BodyWriter(), func(status int, headers http.Header) {
 		copyResponseHeaders(c, headers)
 		c.Status(status)
 	}, inspectNonStream, inspect)
