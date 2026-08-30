@@ -10,12 +10,19 @@ import (
 
 // Metrics is a small dependency-free Prometheus collector. Callers supply only
 // bounded labels; it never accepts tenant, request, rule, or content values.
-type Metrics struct {
+// Writes are sharded so the request hot path never queues on a single lock;
+// Render briefly snapshots each shard and merges them.
+type Metrics struct{ shards [metricShards]metricShard }
+
+const metricShards = 32
+
+type metricShard struct {
 	mu         sync.Mutex
 	counters   map[string]map[string]uint64
-	histograms map[string]map[string]*histogram
 	gauges     map[string]map[string]float64
+	histograms map[string]map[string]*histogram
 }
+
 type histogram struct {
 	count   uint64
 	sum     float64
@@ -25,46 +32,68 @@ type histogram struct {
 var latencyBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2, 5}
 
 func NewMetrics() *Metrics {
-	return &Metrics{counters: map[string]map[string]uint64{}, histograms: map[string]map[string]*histogram{}, gauges: map[string]map[string]float64{}}
+	m := &Metrics{}
+	for i := range m.shards {
+		m.shards[i] = metricShard{counters: map[string]map[string]uint64{}, gauges: map[string]map[string]float64{}, histograms: map[string]map[string]*histogram{}}
+	}
+	return m
 }
+
+// metricShardIndex is an allocation-free FNV-1a over name and label key.
+func metricShardIndex(name, key string) int {
+	h := uint32(2166136261)
+	for i := 0; i < len(name); i++ {
+		h ^= uint32(name[i])
+		h *= 16777619
+	}
+	h ^= 0
+	for i := 0; i < len(key); i++ {
+		h ^= uint32(key[i])
+		h *= 16777619
+	}
+	return int(h % metricShards)
+}
+
 func (m *Metrics) Set(name string, value float64, labels map[string]string) {
 	if m == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	key := labelKey(labels)
-	if m.gauges[name] == nil {
-		m.gauges[name] = map[string]float64{}
+	shard := &m.shards[metricShardIndex(name, key)]
+	shard.mu.Lock()
+	if shard.gauges[name] == nil {
+		shard.gauges[name] = map[string]float64{}
 	}
-	m.gauges[name][key] = value
+	shard.gauges[name][key] = value
+	shard.mu.Unlock()
 }
 func (m *Metrics) Inc(name string, labels map[string]string) {
 	if m == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	key := labelKey(labels)
-	if m.counters[name] == nil {
-		m.counters[name] = map[string]uint64{}
+	shard := &m.shards[metricShardIndex(name, key)]
+	shard.mu.Lock()
+	if shard.counters[name] == nil {
+		shard.counters[name] = map[string]uint64{}
 	}
-	m.counters[name][key]++
+	shard.counters[name][key]++
+	shard.mu.Unlock()
 }
 func (m *Metrics) Observe(name string, seconds float64, labels map[string]string) {
 	if m == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	key := labelKey(labels)
-	if m.histograms[name] == nil {
-		m.histograms[name] = map[string]*histogram{}
+	shard := &m.shards[metricShardIndex(name, key)]
+	shard.mu.Lock()
+	if shard.histograms[name] == nil {
+		shard.histograms[name] = map[string]*histogram{}
 	}
-	h := m.histograms[name][key]
+	h := shard.histograms[name][key]
 	if h == nil {
 		h = &histogram{buckets: make([]uint64, len(latencyBuckets))}
-		m.histograms[name][key] = h
+		shard.histograms[name][key] = h
 	}
 	h.count++
 	h.sum += seconds
@@ -73,31 +102,71 @@ func (m *Metrics) Observe(name string, seconds float64, labels map[string]string
 			h.buckets[i]++
 		}
 	}
+	shard.mu.Unlock()
 }
 func (m *Metrics) Render() string {
 	if m == nil {
 		return ""
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	counters := map[string]map[string]uint64{}
+	gauges := map[string]map[string]float64{}
+	histograms := map[string]map[string]*histogram{}
+	for i := range m.shards {
+		shard := &m.shards[i]
+		shard.mu.Lock()
+		for name, keys := range shard.counters {
+			if counters[name] == nil {
+				counters[name] = map[string]uint64{}
+			}
+			for key, value := range keys {
+				counters[name][key] += value
+			}
+		}
+		for name, keys := range shard.gauges {
+			if gauges[name] == nil {
+				gauges[name] = map[string]float64{}
+			}
+			for key, value := range keys {
+				gauges[name][key] = value
+			}
+		}
+		for name, keys := range shard.histograms {
+			if histograms[name] == nil {
+				histograms[name] = map[string]*histogram{}
+			}
+			for key, h := range keys {
+				merged := histograms[name][key]
+				if merged == nil {
+					merged = &histogram{buckets: make([]uint64, len(latencyBuckets))}
+					histograms[name][key] = merged
+				}
+				merged.count += h.count
+				merged.sum += h.sum
+				for i, b := range h.buckets {
+					merged.buckets[i] += b
+				}
+			}
+		}
+		shard.mu.Unlock()
+	}
 	var lines []string
-	names := sortedKeys(m.counters)
+	names := sortedKeys(counters)
 	for _, name := range names {
 		lines = append(lines, "# TYPE "+name+" counter")
-		for _, key := range sortedKeys(m.counters[name]) {
-			lines = append(lines, name+key+" "+strconv.FormatUint(m.counters[name][key], 10))
+		for _, key := range sortedKeys(counters[name]) {
+			lines = append(lines, name+key+" "+strconv.FormatUint(counters[name][key], 10))
 		}
 	}
-	for _, name := range sortedKeys(m.gauges) {
+	for _, name := range sortedKeys(gauges) {
 		lines = append(lines, "# TYPE "+name+" gauge")
-		for _, key := range sortedKeys(m.gauges[name]) {
-			lines = append(lines, name+key+" "+strconv.FormatFloat(m.gauges[name][key], 'f', -1, 64))
+		for _, key := range sortedKeys(gauges[name]) {
+			lines = append(lines, name+key+" "+strconv.FormatFloat(gauges[name][key], 'f', -1, 64))
 		}
 	}
-	for _, name := range sortedKeys(m.histograms) {
+	for _, name := range sortedKeys(histograms) {
 		lines = append(lines, "# TYPE "+name+" histogram")
-		for _, key := range sortedKeys(m.histograms[name]) {
-			h := m.histograms[name][key]
+		for _, key := range sortedKeys(histograms[name]) {
+			h := histograms[name][key]
 			for i, b := range latencyBuckets {
 				lines = append(lines, name+"_bucket"+addLabel(key, "le", fmt.Sprintf("%g", b))+" "+strconv.FormatUint(h.buckets[i], 10))
 			}
