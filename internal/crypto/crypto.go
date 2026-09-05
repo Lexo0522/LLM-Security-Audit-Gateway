@@ -75,7 +75,7 @@ func LoadOrCreate(path string) (*Key, error) {
 	if path == "" {
 		return nil, fmt.Errorf("key path is required")
 	}
-	data, err := os.ReadFile(path) // #nosec G304 -- path is the deployment-configured server key, never request data
+	data, err := os.ReadFile(path) // #nosec G304 -- path comes from trusted operator configuration, not user or request input
 	if err == nil {
 		if chmodErr := os.Chmod(path, 0600); chmodErr != nil {
 			return nil, fmt.Errorf("restrict encryption key permissions: %w", chmodErr)
@@ -95,10 +95,10 @@ func LoadOrCreate(path string) (*Key, error) {
 	if _, err := io.ReadFull(rand.Reader, raw); err != nil {
 		return nil, fmt.Errorf("generate encryption key: %w", err)
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- path is the deployment-configured server key, never request data
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- path comes from trusted operator configuration, not user or request input
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
-			data, readErr := os.ReadFile(path) // #nosec G304 -- path is the deployment-configured server key, never request data
+			data, readErr := os.ReadFile(path) // #nosec G304 -- path comes from trusted operator configuration, not user or request input
 			if readErr != nil {
 				return nil, fmt.Errorf("read concurrently-created encryption key: %w", readErr)
 			}
