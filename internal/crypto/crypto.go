@@ -75,7 +75,7 @@ func LoadOrCreate(path string) (*Key, error) {
 	if path == "" {
 		return nil, fmt.Errorf("key path is required")
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is the deployment-configured server key, never request data
 	if err == nil {
 		if chmodErr := os.Chmod(path, 0600); chmodErr != nil {
 			return nil, fmt.Errorf("restrict encryption key permissions: %w", chmodErr)
@@ -88,17 +88,17 @@ func LoadOrCreate(path string) (*Key, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, fmt.Errorf("create encryption key directory: %w", err)
 	}
-	if err := os.Chmod(filepath.Dir(path), 0700); err != nil {
+	if err := os.Chmod(filepath.Dir(path), 0700); err != nil { // #nosec G302 -- the key directory must remain private and executable by its owner
 		return nil, fmt.Errorf("restrict encryption key directory permissions: %w", err)
 	}
 	raw := make([]byte, KeySize)
 	if _, err := io.ReadFull(rand.Reader, raw); err != nil {
 		return nil, fmt.Errorf("generate encryption key: %w", err)
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- path is the deployment-configured server key, never request data
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
-			data, readErr := os.ReadFile(path)
+			data, readErr := os.ReadFile(path) // #nosec G304 -- path is the deployment-configured server key, never request data
 			if readErr != nil {
 				return nil, fmt.Errorf("read concurrently-created encryption key: %w", readErr)
 			}
