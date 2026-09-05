@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/url"
@@ -90,8 +89,6 @@ func (r *Repository) RevokeAdminSession(ctx context.Context, tokenHash []byte) e
 	_, err := r.pool.Exec(ctx, `UPDATE admin_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE token_hash=$1`, tokenHash)
 	return err
 }
-
-func sessionDigest(token string) []byte { sum := sha256.Sum256([]byte(token)); return sum[:] }
 
 func ValidateUpstreamURL(raw string) error {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
