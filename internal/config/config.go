@@ -14,8 +14,6 @@ type Config struct {
 	AllowDemoBootstrap        bool
 	ListenAddr                string
 	AdminAddr                 string
-	UpstreamURL               string
-	UpstreamAPIKey            string
 	MaxBodyBytes              int
 	MaxResponseBytes          int
 	RequestTimeoutMS          int
@@ -33,7 +31,7 @@ type Config struct {
 	KafkaConsumerGroup        string
 	ClickHouseDSN             string
 	ConsumerListenAddr        string
-	AdminToken                string
+	EncryptionKeyFile         string
 	RateLimitRPS              int
 	RateLimitBurst            int
 	AuditorURL                string
@@ -41,7 +39,6 @@ type Config struct {
 	AuditorTimeoutMS          int
 	AuditorConcurrency        int
 	EventQueueSize            int
-	APIKeyPepper              string
 	SSEAuditWindowBytes       int
 	SSEMaxEventBytes          int
 	HealthProbeIntervalMS     int
@@ -76,8 +73,6 @@ func Load() (Config, error) {
 		AllowDemoBootstrap:        boolOpt("ALLOW_DEMO_BOOTSTRAP_RULES", false),
 		ListenAddr:                env("GATEWAY_LISTEN_ADDR", ":8080"),
 		AdminAddr:                 env("GATEWAY_ADMIN_ADDR", ":8081"),
-		UpstreamURL:               strings.TrimRight(env("NEWAPI_BASE_URL", "http://newapi:3000"), "/"),
-		UpstreamAPIKey:            os.Getenv("NEWAPI_API_KEY"),
 		MaxBodyBytes:              intOpt("MAX_BODY_BYTES", 4<<20),
 		MaxResponseBytes:          intOpt("MAX_RESPONSE_BYTES", 16<<20),
 		RequestTimeoutMS:          intOpt("REQUEST_TIMEOUT_MS", 120000),
@@ -95,7 +90,8 @@ func Load() (Config, error) {
 		KafkaConsumerGroup:        env("KAFKA_CONSUMER_GROUP", "audit-clickhouse-v1"),
 		ClickHouseDSN:             os.Getenv("CLICKHOUSE_DSN"),
 		ConsumerListenAddr:        env("AUDIT_CONSUMER_LISTEN_ADDR", ":9090"),
-		AdminToken:                os.Getenv("ADMIN_API_TOKEN"),
+		EncryptionKeyFile:         env("GATEWAY_ENCRYPTION_KEY_FILE", "/var/lib/gateway/keys/encryption.key"),
+
 		RateLimitRPS:              intOpt("RATE_LIMIT_RPS", 60),
 		RateLimitBurst:            intOpt("RATE_LIMIT_BURST", 120),
 		AuditorURL:                os.Getenv("AUDITOR_URL"),
@@ -103,7 +99,6 @@ func Load() (Config, error) {
 		AuditorTimeoutMS:          intOpt("AUDITOR_TIMEOUT_MS", 350),
 		AuditorConcurrency:        intOpt("AUDITOR_CONCURRENCY", 8),
 		EventQueueSize:            intOpt("AUDIT_EVENT_QUEUE_SIZE", 1000),
-		APIKeyPepper:              os.Getenv("GATEWAY_API_KEY_PEPPER"),
 		SSEAuditWindowBytes:       intOpt("SSE_AUDIT_WINDOW_BYTES", 16<<10),
 		SSEMaxEventBytes:          intOpt("SSE_MAX_EVENT_BYTES", 256<<10),
 		HealthProbeIntervalMS:     intOpt("HEALTH_PROBE_INTERVAL_MS", 5000),
@@ -129,14 +124,8 @@ func (c Config) Validate() error {
 	if c.AllowDemoBootstrap && c.Environment == "production" {
 		return fmt.Errorf("ALLOW_DEMO_BOOTSTRAP_RULES is not allowed in production")
 	}
-	if len(c.APIKeyPepper) < 32 {
-		return fmt.Errorf("GATEWAY_API_KEY_PEPPER must be at least 32 bytes")
-	}
 	if c.PostgresURL == "" {
-		return fmt.Errorf("POSTGRES_URL is required for gateway API key authentication")
-	}
-	if c.AdminToken != "" && c.Environment == "production" && (len(c.AdminToken) < 24 || strings.EqualFold(c.AdminToken, "change-me")) {
-		return fmt.Errorf("ADMIN_API_TOKEN must be at least 24 characters and not a placeholder in production")
+		return fmt.Errorf("POSTGRES_URL is required for gateway identity and administration")
 	}
 	return nil
 }

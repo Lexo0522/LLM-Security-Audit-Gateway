@@ -36,7 +36,7 @@ func benchApp(b *testing.B, cfg config.Config) *fiber.App {
 		b.Fatal(err)
 	}
 	app := fiber.New()
-	New(cfg, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "bench-tenant", APIKeyID: "bench-key"}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
+	NewBound(cfg, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "bench-tenant", APIKeyID: "bench-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
 	return app
 }
 
@@ -58,12 +58,12 @@ func benchRequest(b *testing.B, app *fiber.App, body string, stream bool) {
 }
 
 func BenchmarkProxyJSON(b *testing.B) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := newTestUpstream(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello! how can I help you today?"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":12,"total_tokens":21}}`))
 	}))
 	defer upstream.Close()
-	app := benchApp(b, config.Config{UpstreamURL: upstream.URL, MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, AuditEnabled: true})
+	app := benchApp(b, config.Config{MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, AuditEnabled: true})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -72,12 +72,12 @@ func BenchmarkProxyJSON(b *testing.B) {
 }
 
 func BenchmarkProxyJSONAuditDisabled(b *testing.B) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := newTestUpstream(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer upstream.Close()
-	app := benchApp(b, config.Config{UpstreamURL: upstream.URL, MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, AuditEnabled: false})
+	app := benchApp(b, config.Config{MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, AuditEnabled: false})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -87,7 +87,7 @@ func BenchmarkProxyJSONAuditDisabled(b *testing.B) {
 
 func BenchmarkProxySSE(b *testing.B) {
 	const events = 50
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := newTestUpstream(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
 		for i := 0; i < events; i++ {
@@ -98,7 +98,7 @@ func BenchmarkProxySSE(b *testing.B) {
 		flusher.Flush()
 	}))
 	defer upstream.Close()
-	app := benchApp(b, config.Config{UpstreamURL: upstream.URL, MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, AuditEnabled: true})
+	app := benchApp(b, config.Config{MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, AuditEnabled: true})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

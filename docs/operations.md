@@ -24,7 +24,7 @@ Load `deploy/prometheus-alerts.yml` into the deployment's Prometheus. Investigat
 
 Run `cmd/audit-consumer` independently from the gateway. It requires `KAFKA_BROKERS` and `CLICKHOUSE_DSN`; `KAFKA_CONSUMER_GROUP` defaults to `audit-clickhouse-v1`, and invalid v2 messages are sent to `${KAFKA_AUDIT_TOPIC}.dlq` unless `KAFKA_AUDIT_DLQ_TOPIC` is set. DLQ envelopes retain the original bytes in `payload_base64`. A failed DLQ write is retried before the source offset can be committed. The consumer creates its idempotent `audit_events` schema at startup, retains events for 180 days, and exposes `/healthz`, `/readyz`, and `/metrics` on `AUDIT_CONSUMER_LISTEN_ADDR` (default `:9090`).
 
-The gateway's admin listener exposes read-only ClickHouse views when `CLICKHOUSE_DSN` is configured. All require `Authorization: Bearer $ADMIN_API_TOKEN`:
+The gateway's admin listener exposes read-only ClickHouse views when `CLICKHOUSE_DSN` is configured. Sign in through the web app at `http://localhost:3000`; it reverse-proxies same-origin management requests to the gateway's internal `:8081` listener. The web app also provides first-time administrator setup, upstream configuration, and gateway-key management. The gateway encryption key is stored at `/var/lib/gateway/keys/encryption.key` on the `gateway-keys` volume; back up that volume with the database, because losing the key makes saved upstream credentials unrecoverable:
 
 - `GET /admin/v1/audit/events?from=<RFC3339>&to=<RFC3339>&tenant_id=&decision=&direction=&path=&model=&rule_id=&min_risk_score=&page_size=&cursor=`
 - `GET /admin/v1/audit/events/<event_id>`
@@ -34,7 +34,7 @@ Event ranges default to the previous 24 hours and are capped at 31 days. Summari
 
 ## Kafka fault drill
 
-With the Compose project running and an admin token configured, stop Kafka with `docker compose -f deploy/docker-compose.yml stop kafka`. Confirm `GET /readyz` remains HTTP 200 with the Kafka component degraded, then generate an audited request or admin operation. Check `audit_outbox_pending` on gateway `/metrics` rises. Start Kafka again with `docker compose -f deploy/docker-compose.yml start kafka`; the metric must return to zero after retry backoff, and the replayed `event_id` must appear through `GET /admin/v1/audit/events`. This demonstrates that requests are independent of Kafka and that committed audit events are replayable.
+With the Compose project running, sign in through the web app and stop Kafka with `docker compose -f deploy/docker-compose.yml stop kafka`. Confirm `GET /readyz` remains HTTP 200 with the Kafka component degraded, then generate an audited request or admin operation. Check `audit_outbox_pending` on gateway `/metrics` rises. Start Kafka again with `docker compose -f deploy/docker-compose.yml start kafka`; the metric must return to zero after retry backoff, and the replayed `event_id` must appear through the web app's audit view or `GET /admin/v1/audit/events`. This demonstrates that requests are independent of Kafka and that committed audit events are replayable.
 
 ## Docker Desktop path compatibility
 

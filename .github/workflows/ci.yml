@@ -58,7 +58,6 @@ jobs:
   # instead of keeping a second Bash copy of the same flow.
   integration:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

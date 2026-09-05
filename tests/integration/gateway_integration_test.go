@@ -15,6 +15,7 @@ import (
 	"github.com/example/ai-audit-gateway/internal/auth"
 	clickstore "github.com/example/ai-audit-gateway/internal/clickhouse"
 	"github.com/example/ai-audit-gateway/internal/consumer"
+	internalcrypto "github.com/example/ai-audit-gateway/internal/crypto"
 	"github.com/example/ai-audit-gateway/internal/events"
 	"github.com/example/ai-audit-gateway/internal/policy"
 	"github.com/example/ai-audit-gateway/internal/ratelimit"
@@ -58,7 +59,7 @@ func TestKafkaAuditEventIsAvailableInClickHouse(t *testing.T) {
 	}
 	topic := "audit.events.clickhouse.integration"
 	group := "audit-clickhouse-integration-" + uuid.NewString()
-	delivery, err := consumer.New(consumer.Config{Brokers: []string{os.Getenv("KAFKA_BROKER")}, Topic: topic, GroupID: group}, destination, nil, nil)
+	delivery, err := consumer.New(consumer.Config{Brokers: []string{os.Getenv("KAFKA_BROKERS")}, Topic: topic, GroupID: group}, destination, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestKafkaAuditEventIsAvailableInClickHouse(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- delivery.Run(consumerCtx) }()
 	defer func() { cancel(); _ = delivery.Close(); <-done }()
-	publisher := events.NewKafka([]string{os.Getenv("KAFKA_BROKER")}, topic)
+	publisher := events.NewKafka([]string{os.Getenv("KAFKA_BROKERS")}, topic)
 	defer publisher.Close()
 	event := audit.Event{SchemaVersion: "2", EventID: uuid.NewString(), EventTime: time.Now().UTC(), RequestID: "clickhouse-consumer", TenantID: "tenant-clickhouse", Direction: audit.DirectionRequest, Path: "/v1/chat/completions", Model: "gpt-integration", Decision: "allow", RiskScore: 15, RuleVersion: "integration", LatencyMS: 12, Matches: []audit.Match{{RuleID: "rule-integration", Name: "integration", Action: "monitor", Weight: 15}}}
 	if err = publisher.Publish(ctx, event); err != nil {
@@ -108,12 +109,12 @@ func TestKafkaAuditEventIsAvailableInClickHouse(t *testing.T) {
 	}
 
 	invalid := []byte{0xff, '{'}
-	invalidWriter := &kafka.Writer{Addr: kafka.TCP(os.Getenv("KAFKA_BROKER")), Topic: topic, RequiredAcks: kafka.RequireAll}
+	invalidWriter := &kafka.Writer{Addr: kafka.TCP(os.Getenv("KAFKA_BROKERS")), Topic: topic, RequiredAcks: kafka.RequireAll}
 	if err = invalidWriter.WriteMessages(ctx, kafka.Message{Value: invalid}); err != nil {
 		t.Fatal(err)
 	}
 	_ = invalidWriter.Close()
-	dlqReader := kafka.NewReader(kafka.ReaderConfig{Brokers: []string{os.Getenv("KAFKA_BROKER")}, Topic: topic + ".dlq", Partition: 0, StartOffset: kafka.FirstOffset})
+	dlqReader := kafka.NewReader(kafka.ReaderConfig{Brokers: []string{os.Getenv("KAFKA_BROKERS")}, Topic: topic + ".dlq", Partition: 0, StartOffset: kafka.FirstOffset})
 	defer dlqReader.Close()
 	dlqCtx, dlqCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer dlqCancel()
@@ -146,11 +147,19 @@ func TestPostgresGatewayIdentityAndPolicyPersistence(t *testing.T) {
 	if err = repo.EnsurePolicies(ctx); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := auth.NewManager(repo, "0123456789abcdef0123456789abcdef")
+	manager, err := auth.NewManager(repo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, key, err := manager.Create(ctx, "tenant-persistence")
+	encryptionKey, err := internalcrypto.New(make([]byte, internalcrypto.KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream, err := repo.CreateUpstream(ctx, "integration-upstream-"+uuid.NewString(), "http://127.0.0.1:1", "integration-upstream-key", true, encryptionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, key, err := manager.CreateForUpstream(ctx, "tenant-persistence", upstream.ID, "integration-key")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,16 +220,16 @@ func TestPostgresAuditEventPersistence(t *testing.T) {
 
 func TestKafkaAuditEventSchemaAndTenantKey(t *testing.T) {
 	topic := "audit.events.integration"
-	publisher := events.NewKafka([]string{os.Getenv("KAFKA_BROKER")}, topic)
+	publisher := events.NewKafka([]string{os.Getenv("KAFKA_BROKERS")}, topic)
 	if publisher == nil {
-		t.Fatal("KAFKA_BROKER is required")
+		t.Fatal("KAFKA_BROKERS is required")
 	}
 	defer publisher.Close()
 	event := audit.Event{SchemaVersion: "2", EventID: uuid.NewString(), TenantID: "tenant-a", Direction: audit.DirectionAdmin, Metadata: map[string]string{"operation": "publish"}}
 	if err := publisher.Publish(context.Background(), event); err != nil {
 		t.Fatal(err)
 	}
-	reader := kafka.NewReader(kafka.ReaderConfig{Brokers: []string{os.Getenv("KAFKA_BROKER")}, Topic: topic, Partition: 0, StartOffset: kafka.FirstOffset, MaxWait: time.Second})
+	reader := kafka.NewReader(kafka.ReaderConfig{Brokers: []string{os.Getenv("KAFKA_BROKERS")}, Topic: topic, Partition: 0, StartOffset: kafka.FirstOffset, MaxWait: time.Second})
 	defer reader.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10e9)
 	defer cancel()

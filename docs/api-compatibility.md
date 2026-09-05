@@ -25,6 +25,6 @@ An oversized event uses the same format with code `sse_event_too_large`. The gat
 - `stream=true` 的 SSE 响应
 - `usage`、`tool_calls`、`finish_reason` 和 `[DONE]`
 
-网关不允许请求体指定任意上游地址；上游只由 `NEWAPI_BASE_URL` 配置。请求方向使用规范化副本审计，原始 body 继续转发。
+网关不允许请求体指定任意上游地址；上游由管理员在网页中配置，并通过已绑定上游的网关 API Key 选择。请求方向使用规范化副本审计，原始 body 继续转发。
 
 流式响应会逐行扫描并及时转发。若后续 chunk 命中高风险规则，网关会停止继续转发，但已经发送给客户端的内容无法撤回。

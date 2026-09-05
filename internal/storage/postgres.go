@@ -353,7 +353,7 @@ func (r *Repository) CreateGatewayAPIKey(ctx context.Context, record auth.KeyRec
 	if r == nil {
 		return auth.KeyRecord{}, fmt.Errorf("postgres disabled")
 	}
-	err := r.pool.QueryRow(ctx, `INSERT INTO gateway_api_keys(id,tenant_id,prefix,key_hmac) VALUES($1,$2,$3,$4) RETURNING created_at`, record.ID, record.TenantID, record.Prefix, record.HMAC).Scan(&record.CreatedAt)
+	err := r.pool.QueryRow(ctx, `INSERT INTO gateway_api_keys(id,tenant_id,upstream_id,display_name,prefix,key_digest,key_salt) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING created_at`, record.ID, record.TenantID, nullableUUID(record.UpstreamID), nullableText(record.DisplayName), record.Prefix, record.KeyDigest, record.KeySalt).Scan(&record.CreatedAt)
 	return record, err
 }
 func (r *Repository) LookupGatewayAPIKey(ctx context.Context, id string) (auth.KeyRecord, bool, error) {
@@ -361,7 +361,7 @@ func (r *Repository) LookupGatewayAPIKey(ctx context.Context, id string) (auth.K
 		return auth.KeyRecord{}, false, fmt.Errorf("postgres disabled")
 	}
 	var record auth.KeyRecord
-	err := r.pool.QueryRow(ctx, `SELECT id,tenant_id,prefix,key_hmac,created_at,revoked_at FROM gateway_api_keys WHERE id=$1`, id).Scan(&record.ID, &record.TenantID, &record.Prefix, &record.HMAC, &record.CreatedAt, &record.RevokedAt)
+	err := r.pool.QueryRow(ctx, `SELECT id,tenant_id,COALESCE(upstream_id::text,''),COALESCE(display_name,''),prefix,key_digest,key_salt,created_at,revoked_at FROM gateway_api_keys WHERE id=$1`, id).Scan(&record.ID, &record.TenantID, &record.UpstreamID, &record.DisplayName, &record.Prefix, &record.KeyDigest, &record.KeySalt, &record.CreatedAt, &record.RevokedAt)
 	if err == pgx.ErrNoRows {
 		return auth.KeyRecord{}, false, nil
 	}
@@ -371,7 +371,7 @@ func (r *Repository) ListGatewayAPIKeys(ctx context.Context, tenantID string) ([
 	if r == nil {
 		return nil, fmt.Errorf("postgres disabled")
 	}
-	query := `SELECT id,tenant_id,prefix,created_at,revoked_at FROM gateway_api_keys`
+	query := `SELECT id,tenant_id,COALESCE(upstream_id::text,''),COALESCE(display_name,''),prefix,created_at,revoked_at FROM gateway_api_keys`
 	var rows pgx.Rows
 	var err error
 	if tenantID == "" {
@@ -386,7 +386,7 @@ func (r *Repository) ListGatewayAPIKeys(ctx context.Context, tenantID string) ([
 	result := []auth.KeyRecord{}
 	for rows.Next() {
 		var record auth.KeyRecord
-		if err := rows.Scan(&record.ID, &record.TenantID, &record.Prefix, &record.CreatedAt, &record.RevokedAt); err != nil {
+		if err := rows.Scan(&record.ID, &record.TenantID, &record.UpstreamID, &record.DisplayName, &record.Prefix, &record.CreatedAt, &record.RevokedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, record)
@@ -398,7 +398,7 @@ func (r *Repository) RevokeGatewayAPIKey(ctx context.Context, id string) (auth.K
 		return auth.KeyRecord{}, false, fmt.Errorf("postgres disabled")
 	}
 	var record auth.KeyRecord
-	err := r.pool.QueryRow(ctx, `UPDATE gateway_api_keys SET revoked_at=COALESCE(revoked_at,now()) WHERE id=$1 RETURNING id,tenant_id,prefix,created_at,revoked_at`, id).Scan(&record.ID, &record.TenantID, &record.Prefix, &record.CreatedAt, &record.RevokedAt)
+	err := r.pool.QueryRow(ctx, `UPDATE gateway_api_keys SET revoked_at=COALESCE(revoked_at,now()) WHERE id=$1 RETURNING id,tenant_id,COALESCE(upstream_id::text,''),COALESCE(display_name,''),prefix,created_at,revoked_at`, id).Scan(&record.ID, &record.TenantID, &record.UpstreamID, &record.DisplayName, &record.Prefix, &record.CreatedAt, &record.RevokedAt)
 	if err == pgx.ErrNoRows {
 		return auth.KeyRecord{}, false, nil
 	}
@@ -591,6 +591,12 @@ func (e *ValidationError) Unwrap() error { return e.err }
 // IsNotFound reports whether err is a PostgreSQL no-rows scan result.
 func IsNotFound(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
 func nullableUUID(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+func nullableText(value string) any {
 	if value == "" {
 		return nil
 	}
