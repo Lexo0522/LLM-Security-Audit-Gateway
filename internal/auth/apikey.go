@@ -17,7 +17,7 @@ import (
 const (
 	keyPrefix        = "agw"
 	secretByteLength = 32
-	minimumPepperLen = 32
+	digestSaltLength = 16
 )
 
 var (
@@ -25,27 +25,29 @@ var (
 	ErrUnavailable = errors.New("gateway identity unavailable")
 )
 
-// KeyRecord is safe to return from management APIs. HMAC is populated only
-// while authenticating and is never serialized.
+// KeyRecord contains safe key metadata and the verifier fields used internally.
 type KeyRecord struct {
-	ID        string     `json:"id"`
-	TenantID  string     `json:"tenant_id"`
-	Prefix    string     `json:"prefix"`
-	CreatedAt time.Time  `json:"created_at"`
-	RevokedAt *time.Time `json:"revoked_at,omitempty"`
-	HMAC      []byte     `json:"-"`
+	ID          string     `json:"id"`
+	TenantID    string     `json:"tenant_id"`
+	UpstreamID  string     `json:"upstream_id,omitempty"`
+	DisplayName string     `json:"display_name,omitempty"`
+	Prefix      string     `json:"prefix"`
+	CreatedAt   time.Time  `json:"created_at"`
+	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
+	KeyDigest   []byte     `json:"-"`
+	KeySalt     []byte     `json:"-"`
 }
 
 type Identity struct {
-	APIKeyID string
-	TenantID string
+	APIKeyID   string
+	TenantID   string
+	UpstreamID string
 }
 
 type Authenticator interface {
 	Authenticate(context.Context, string) (Identity, error)
 }
 
-// KeyStore is implemented by the persistent credential repository.
 type KeyStore interface {
 	CreateGatewayAPIKey(context.Context, KeyRecord) (KeyRecord, error)
 	LookupGatewayAPIKey(context.Context, string) (KeyRecord, bool, error)
@@ -54,23 +56,26 @@ type KeyStore interface {
 }
 
 type Manager struct {
-	store  KeyStore
-	pepper []byte
+	store KeyStore
 }
 
-func NewManager(store KeyStore, pepper string) (*Manager, error) {
+// NewManager authenticates against per-key salted digests persisted by the KeyStore.
+func NewManager(store KeyStore) (*Manager, error) {
 	if store == nil {
 		return nil, fmt.Errorf("API key store is required")
 	}
-	if len(pepper) < minimumPepperLen {
-		return nil, fmt.Errorf("GATEWAY_API_KEY_PEPPER must be at least %d bytes", minimumPepperLen)
-	}
-	return &Manager{store: store, pepper: []byte(pepper)}, nil
+	return &Manager{store: store}, nil
 }
 
-func (m *Manager) Create(ctx context.Context, tenantID string) (KeyRecord, string, error) {
+func (m *Manager) CreateForUpstream(ctx context.Context, tenantID, upstreamID, displayName string) (KeyRecord, string, error) {
 	if !ValidTenantID(tenantID) {
 		return KeyRecord{}, "", fmt.Errorf("invalid tenant_id")
+	}
+	if upstreamID == "" {
+		return KeyRecord{}, "", fmt.Errorf("upstream_id is required")
+	}
+	if _, err := uuid.Parse(upstreamID); err != nil {
+		return KeyRecord{}, "", fmt.Errorf("invalid upstream_id")
 	}
 	secret := make([]byte, secretByteLength)
 	if _, err := rand.Read(secret); err != nil {
@@ -78,17 +83,17 @@ func (m *Manager) Create(ctx context.Context, tenantID string) (KeyRecord, strin
 	}
 	id := uuid.NewString()
 	key := keyPrefix + "." + id + "." + base64.RawURLEncoding.EncodeToString(secret)
-	record := KeyRecord{
-		ID:       id,
-		TenantID: tenantID,
-		Prefix:   keyPrefix + "." + id + ".",
-		HMAC:     Digest(key, m.pepper),
+	record := KeyRecord{ID: id, TenantID: tenantID, UpstreamID: upstreamID, DisplayName: displayName, Prefix: keyPrefix + "." + id + "."}
+	record.KeySalt = make([]byte, digestSaltLength)
+	if _, err := rand.Read(record.KeySalt); err != nil {
+		return KeyRecord{}, "", fmt.Errorf("generate API key salt: %w", err)
 	}
+	record.KeyDigest = DigestSalted(key, record.KeySalt)
 	stored, err := m.store.CreateGatewayAPIKey(ctx, record)
 	if err != nil {
 		return KeyRecord{}, "", err
 	}
-	stored.HMAC = nil
+	stored.KeyDigest, stored.KeySalt = nil, nil
 	return stored, key, nil
 }
 
@@ -101,10 +106,14 @@ func (m *Manager) Authenticate(ctx context.Context, authorization string) (Ident
 	if err != nil {
 		return Identity{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
-	if !found || record.RevokedAt != nil || !hmac.Equal(record.HMAC, Digest(key, m.pepper)) {
+	valid := false
+	if found && record.RevokedAt == nil && len(record.KeyDigest) > 0 && len(record.KeySalt) > 0 {
+		valid = hmac.Equal(record.KeyDigest, DigestSalted(key, record.KeySalt))
+	}
+	if !found || !valid {
 		return Identity{}, ErrInvalidKey
 	}
-	return Identity{APIKeyID: record.ID, TenantID: record.TenantID}, nil
+	return Identity{APIKeyID: record.ID, TenantID: record.TenantID, UpstreamID: record.UpstreamID}, nil
 }
 
 func (m *Manager) List(ctx context.Context, tenantID string) ([]KeyRecord, error) {
@@ -113,21 +122,19 @@ func (m *Manager) List(ctx context.Context, tenantID string) ([]KeyRecord, error
 	}
 	return m.store.ListGatewayAPIKeys(ctx, tenantID)
 }
-
 func (m *Manager) Revoke(ctx context.Context, id string) (KeyRecord, bool, error) {
 	if _, err := uuid.Parse(id); err != nil {
 		return KeyRecord{}, false, fmt.Errorf("invalid API key id")
 	}
 	return m.store.RevokeGatewayAPIKey(ctx, id)
 }
-
-func Digest(key string, pepper []byte) []byte {
-	mac := hmac.New(sha256.New, pepper)
-	_, _ = mac.Write([]byte(key))
-	return mac.Sum(nil)
+func DigestSalted(key string, salt []byte) []byte {
+	h := sha256.New()
+	_, _ = h.Write(salt)
+	_, _ = h.Write([]byte(key))
+	return h.Sum(nil)
 }
 
-// ParseBearerKey validates the public wire format before any storage lookup.
 func ParseBearerKey(authorization string) (string, string, error) {
 	if !strings.HasPrefix(authorization, "Bearer ") {
 		return "", "", ErrInvalidKey
@@ -146,7 +153,6 @@ func ParseBearerKey(authorization string) (string, string, error) {
 	}
 	return key, parts[1], nil
 }
-
 func ValidTenantID(value string) bool {
 	if len(value) == 0 || len(value) > 128 {
 		return false

@@ -32,6 +32,16 @@ type Client struct {
 	http *http.Client
 }
 
+// Upstream is an immutable, server-resolved upstream configuration. It is never
+// constructed from request data.
+type Upstream struct {
+	BaseURL string
+	APIKey  string
+	Enabled bool
+}
+
+var ErrUpstreamUnavailable = errors.New("bound upstream unavailable")
+
 func New(cfg config.Config) *Client {
 	// A dedicated transport with per-phase budgets: connection churn is avoided
 	// by a large idle pool, stalls before first response byte are capped by
@@ -53,11 +63,11 @@ func New(cfg config.Config) *Client {
 	return &Client{cfg: cfg, http: &http.Client{Transport: transport}}
 }
 
-// Do forwards a request to the configured upstream. Non-SSE responses are
-// inspected as one bounded body, while SSE responses are inspected as complete
-// events before each event is written to the client.
-func (c *Client) Do(ctx context.Context, method, path, query string, body []byte, headers http.Header, dst io.Writer, onHeaders func(int, http.Header), inspectResponse func([]byte) bool, inspectSSE stream.Inspector) error {
-	target, err := url.JoinPath(c.cfg.UpstreamURL, path)
+func (c *Client) DoUpstream(ctx context.Context, upstream Upstream, method, path, query string, body []byte, headers http.Header, dst io.Writer, onHeaders func(int, http.Header), inspectResponse func([]byte) bool, inspectSSE stream.Inspector) error {
+	if !upstream.Enabled || strings.TrimSpace(upstream.BaseURL) == "" {
+		return ErrUpstreamUnavailable
+	}
+	target, err := url.JoinPath(strings.TrimRight(upstream.BaseURL, "/"), path)
 	if err != nil {
 		return err
 	}
@@ -79,8 +89,8 @@ func (c *Client) Do(ctx context.Context, method, path, query string, body []byte
 		return err
 	}
 	copyHeaders(req.Header, headers)
-	if c.cfg.UpstreamAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.cfg.UpstreamAPIKey)
+	if upstream.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+upstream.APIKey)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

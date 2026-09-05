@@ -1,32 +1,27 @@
 package config
 
-import (
-	"testing"
-)
+import "testing"
 
-func TestValidateRequiresPepperAndPostgres(t *testing.T) {
+func TestValidateRequiresPostgres(t *testing.T) {
 	if err := (Config{}).Validate(); err == nil {
-		t.Fatal("missing pepper and postgres should be rejected")
-	}
-	if err := (Config{APIKeyPepper: "0123456789abcdef0123456789abcdef"}).Validate(); err == nil {
 		t.Fatal("missing postgres should be rejected")
 	}
-	if err := (Config{APIKeyPepper: "0123456789abcdef0123456789abcdef", PostgresURL: "postgres://example"}).Validate(); err != nil {
+	if err := (Config{PostgresURL: "postgres://example"}).Validate(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestValidateRejectsWeakAdminTokenInProduction(t *testing.T) {
-	pepper := "0123456789abcdef0123456789abcdef"
-	postgres := "postgres://example"
-	if err := (Config{Environment: "production", AdminToken: "change-me", APIKeyPepper: pepper, PostgresURL: postgres}).Validate(); err == nil {
-		t.Fatal("placeholder admin token should be rejected in production")
-	}
-	if err := (Config{Environment: "production", AdminToken: "short-token", APIKeyPepper: pepper, PostgresURL: postgres}).Validate(); err == nil {
-		t.Fatal("short admin token should be rejected in production")
-	}
-	if err := (Config{Environment: "development", AdminToken: "change-me", APIKeyPepper: pepper, PostgresURL: postgres}).Validate(); err != nil {
+func TestLoadIgnoresRemovedSecretConfiguration(t *testing.T) {
+	t.Setenv("NEWAPI_BASE_URL", "https://ignored.example")
+	t.Setenv("NEWAPI_API_KEY", "ignored")
+	t.Setenv("GATEWAY_API_KEY_PEPPER", "ignored")
+	t.Setenv("ADMIN_API_TOKEN", "ignored")
+	cfg, err := Load()
+	if err != nil {
 		t.Fatal(err)
+	}
+	if cfg.EncryptionKeyFile != "/var/lib/gateway/keys/encryption.key" {
+		t.Fatalf("unexpected encryption key path: %q", cfg.EncryptionKeyFile)
 	}
 }
 
@@ -58,11 +53,10 @@ func TestLoadRejectsInvalidSecurityBooleans(t *testing.T) {
 }
 
 func TestValidateRejectsProductionDemoBootstrap(t *testing.T) {
-	pepper := "0123456789abcdef0123456789abcdef"
-	if err := (Config{Environment: "production", AllowDemoBootstrap: true, APIKeyPepper: pepper, PostgresURL: "postgres://example"}).Validate(); err == nil {
+	if err := (Config{Environment: "production", AllowDemoBootstrap: true, PostgresURL: "postgres://example"}).Validate(); err == nil {
 		t.Fatal("production demo bootstrap should be rejected")
 	}
-	if err := (Config{Environment: "development", AllowDemoBootstrap: true, APIKeyPepper: pepper, PostgresURL: "postgres://example"}).Validate(); err != nil {
+	if err := (Config{Environment: "development", AllowDemoBootstrap: true, PostgresURL: "postgres://example"}).Validate(); err != nil {
 		t.Fatal(err)
 	}
 }

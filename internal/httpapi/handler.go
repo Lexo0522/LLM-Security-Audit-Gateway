@@ -21,6 +21,7 @@ import (
 	"github.com/example/ai-audit-gateway/internal/audit"
 	"github.com/example/ai-audit-gateway/internal/auth"
 	"github.com/example/ai-audit-gateway/internal/config"
+	internalcrypto "github.com/example/ai-audit-gateway/internal/crypto"
 	"github.com/example/ai-audit-gateway/internal/events"
 	"github.com/example/ai-audit-gateway/internal/health"
 	"github.com/example/ai-audit-gateway/internal/normalize"
@@ -29,6 +30,7 @@ import (
 	"github.com/example/ai-audit-gateway/internal/proxy"
 	"github.com/example/ai-audit-gateway/internal/ratelimit"
 	"github.com/example/ai-audit-gateway/internal/rule"
+	"github.com/example/ai-audit-gateway/internal/storage"
 	"github.com/example/ai-audit-gateway/internal/stream"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -40,6 +42,8 @@ type Handler struct {
 	policies      *policy.Resolver
 	identities    auth.Authenticator
 	upstream      *proxy.Client
+	upstreams     UpstreamResolver
+	encryptionKey *internalcrypto.Key
 	limiter       ratelimit.Limiter
 	auditor       audit.Auditor
 	shadowAuditor audit.Auditor
@@ -49,6 +53,10 @@ type Handler struct {
 	authThrottle  *authThrottle
 	shadowOnce    sync.Once
 	shadowJobs    chan shadowJob
+}
+
+type UpstreamResolver interface {
+	GetUpstreamForGatewayKey(context.Context, string, *internalcrypto.Key) (storage.UpstreamSecret, error)
 }
 
 type shadowJob struct {
@@ -84,7 +92,9 @@ func (h *Handler) shadowWorker() {
 	}
 }
 
-func (h *Handler) SetReadiness(readiness *health.Manager) { h.readiness = readiness }
+func (h *Handler) SetReadiness(readiness *health.Manager)        { h.readiness = readiness }
+func (h *Handler) SetUpstreamResolver(resolver UpstreamResolver) { h.upstreams = resolver }
+func (h *Handler) SetEncryptionKey(key *internalcrypto.Key)      { h.encryptionKey = key }
 
 // SetShadowAuditor swaps the auditor used by asynchronous shadow audits so
 // shadow traffic shares neither the failure count nor the concurrency budget of
@@ -171,6 +181,16 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 		h.metrics.Inc("auth_failures_total", nil)
 		return invalidAPIKey(c)
 	}
+	var bound storage.UpstreamSecret
+	if h.upstreams == nil {
+
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": fiber.Map{"message": "API key has no available upstream", "type": "service_unavailable", "code": "upstream_unavailable"}})
+	}
+	bound, err = h.upstreams.GetUpstreamForGatewayKey(requestContext, identity.APIKeyID, h.encryptionKey)
+	if err != nil || !bound.Enabled {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": fiber.Map{"message": "bound upstream unavailable", "type": "service_unavailable", "code": "upstream_unavailable"}})
+	}
+
 	allowed, retry, err := h.limiter.Allow(requestContext, identity.TenantID+":"+c.Path())
 	if err == nil && !allowed {
 		h.metrics.Inc("audit_rate_limit_rejections_total", map[string]string{"endpoint": endpoint(c.Path())})
@@ -333,7 +353,7 @@ func (h *Handler) proxy(c *fiber.Ctx) error {
 			defer cancelTimeout()
 		}
 		defer bodyWriter.Close()
-		err := h.upstream.Do(upstreamCtx, methodValue, pathValue, queryString, auditBody, reqHeaders, dst, func(status int, headers http.Header) {
+		err := h.upstream.DoUpstream(upstreamCtx, proxy.Upstream{BaseURL: bound.BaseURL, APIKey: bound.APIKey, Enabled: bound.Enabled}, methodValue, pathValue, queryString, auditBody, reqHeaders, dst, func(status int, headers http.Header) {
 			headerCh <- headerResult{status: status, headers: headers}
 		}, inspectNonStream, inspect)
 		if err == nil {

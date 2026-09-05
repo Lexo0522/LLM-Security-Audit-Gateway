@@ -3,14 +3,13 @@ $compose = 'deploy/docker-compose.yml'
 $project = 'audit-gateway-integration'
 $env:POSTGRES_PASSWORD = 'audit-integration-password'
 $env:CLICKHOUSE_PASSWORD = 'audit-integration-password'
-$env:GATEWAY_API_KEY_PEPPER = 'integration-pepper-0123456789abcdef'
 $env:INTEGRATION_POSTGRES_PORT = '15432'
 $env:INTEGRATION_REDIS_PORT = '16379'
 $env:INTEGRATION_KAFKA_PORT = '19092'
 $env:INTEGRATION_CLICKHOUSE_PORT = '18123'
 $env:POSTGRES_URL = "postgres://audit:$($env:POSTGRES_PASSWORD)@localhost:$($env:INTEGRATION_POSTGRES_PORT)/audit_gateway?sslmode=disable"
 $env:REDIS_URL = "redis://localhost:$($env:INTEGRATION_REDIS_PORT)/0"
-$env:KAFKA_BROKER = "localhost:$($env:INTEGRATION_KAFKA_PORT)"
+$env:KAFKA_BROKERS = "localhost:$($env:INTEGRATION_KAFKA_PORT)"
 $env:CLICKHOUSE_DSN = "http://audit:$($env:CLICKHOUSE_PASSWORD)@localhost:$($env:INTEGRATION_CLICKHOUSE_PORT)/default"
 
 docker version | Out-Null

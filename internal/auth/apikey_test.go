@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 	"time"
-)
 
-const testPepper = "0123456789abcdef0123456789abcdef"
+	"github.com/google/uuid"
+)
 
 type memoryStore struct {
 	keys map[string]KeyRecord
@@ -43,13 +43,13 @@ func (s *memoryStore) RevokeGatewayAPIKey(_ context.Context, id string) (KeyReco
 	return record, true, nil
 }
 
-func TestGatewayAPIKeyFormatAndHMACAuthentication(t *testing.T) {
+func TestGatewayAPIKeyFormatAndDigestAuthentication(t *testing.T) {
 	store := &memoryStore{}
-	manager, err := NewManager(store, testPepper)
+	manager, err := NewManager(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, key, err := manager.Create(t.Context(), "tenant-a")
+	record, key, err := manager.CreateForUpstream(t.Context(), "tenant-a", uuid.NewString(), "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,8 +57,8 @@ func TestGatewayAPIKeyFormatAndHMACAuthentication(t *testing.T) {
 	if err != nil || parsed != key || id != record.ID {
 		t.Fatalf("parsed=%q id=%q err=%v", parsed, id, err)
 	}
-	if len(store.keys[id].HMAC) != 32 || string(store.keys[id].HMAC) == key {
-		t.Fatal("key material was not persisted as an HMAC digest")
+	if len(store.keys[id].KeyDigest) != 32 || string(store.keys[id].KeyDigest) == key || len(store.keys[id].KeySalt) == 0 {
+		t.Fatal("key material was not persisted as a salted digest")
 	}
 	identity, err := manager.Authenticate(t.Context(), "Bearer "+key)
 	if err != nil || identity.TenantID != "tenant-a" || identity.APIKeyID != record.ID {
@@ -68,8 +68,8 @@ func TestGatewayAPIKeyFormatAndHMACAuthentication(t *testing.T) {
 
 func TestGatewayAPIKeyRejectsRevokedAndUnavailableKeys(t *testing.T) {
 	store := &memoryStore{}
-	manager, _ := NewManager(store, testPepper)
-	record, key, err := manager.Create(t.Context(), "tenant-a")
+	manager, _ := NewManager(store)
+	record, key, err := manager.CreateForUpstream(t.Context(), "tenant-a", uuid.NewString(), "test")
 	if err != nil {
 		t.Fatal(err)
 	}

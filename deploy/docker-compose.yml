@@ -1,19 +1,29 @@
 services:
+  web:
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      gateway:
+        condition: service_started
+    restart: unless-stopped
+
   gateway:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.gateway
     ports:
       - "8080:8080"
-      - "8081:8081"
     environment:
       # Compose is a local development stack. Production must seed managed
       # rules and policies before the gateway starts.
       GATEWAY_ENV: "development"
       ALLOW_DEMO_BOOTSTRAP_RULES: "true"
       GATEWAY_LISTEN_ADDR: ":8080"
-      NEWAPI_BASE_URL: "${NEWAPI_BASE_URL:-http://newapi:3000}"
-      NEWAPI_API_KEY: "${NEWAPI_API_KEY:-}"
+      GATEWAY_ADMIN_ADDR: ":8081"
+      GATEWAY_ENCRYPTION_KEY_FILE: "/var/lib/gateway/keys/encryption.key"
       AUDIT_ENABLED: "${AUDIT_ENABLED:-true}"
       SSE_AUDIT_WINDOW_BYTES: "${SSE_AUDIT_WINDOW_BYTES:-16384}"
       SSE_MAX_EVENT_BYTES: "${SSE_MAX_EVENT_BYTES:-262144}"
@@ -22,11 +32,9 @@ services:
       KAFKA_BROKERS: "kafka:9092"
       KAFKA_AUDIT_TOPIC: "${KAFKA_AUDIT_TOPIC:-audit.events}"
       CLICKHOUSE_DSN: "http://audit:${CLICKHOUSE_PASSWORD:-change-me}@clickhouse:8123/default"
-      ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:-}"
-      GATEWAY_API_KEY_PEPPER: "${GATEWAY_API_KEY_PEPPER:?GATEWAY_API_KEY_PEPPER is required and must be at least 32 bytes}"
+    volumes:
+      - gateway-keys:/var/lib/gateway/keys
     depends_on:
-      newapi:
-        condition: service_started
       postgres:
         condition: service_healthy
       redis:
@@ -59,14 +67,6 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
-    restart: unless-stopped
-
-  newapi:
-    # Pinned instead of latest so development and production upgrades are a
-    # deliberate change; bump the tag after reviewing release notes.
-    image: calciumion/new-api:v0.13.2
-    expose:
-      - "3000"
     restart: unless-stopped
 
   redis:
@@ -149,6 +149,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  gateway-keys:
   postgres-data:
   clickhouse-data:
   kafka-data:

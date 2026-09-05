@@ -12,6 +12,7 @@ import (
 	"github.com/example/ai-audit-gateway/internal/auth"
 	clickstore "github.com/example/ai-audit-gateway/internal/clickhouse"
 	"github.com/example/ai-audit-gateway/internal/config"
+	internalcrypto "github.com/example/ai-audit-gateway/internal/crypto"
 	"github.com/example/ai-audit-gateway/internal/events"
 	"github.com/example/ai-audit-gateway/internal/health"
 	"github.com/example/ai-audit-gateway/internal/httpapi"
@@ -89,7 +90,12 @@ func main() {
 			defer auditStore.Close()
 		}
 	}
-	keys, err := auth.NewManager(repo, cfg.APIKeyPepper)
+	encryptionKey, err := internalcrypto.LoadOrCreate(cfg.EncryptionKeyFile)
+	if err != nil {
+		logger.Error("load encryption key", slog.Any("error", err))
+		return
+	}
+	keys, err := auth.NewManager(repo)
 	if err != nil {
 		logger.Error("create API key manager", slog.Any("error", err))
 		return
@@ -253,10 +259,12 @@ func main() {
 	handler := httpapi.New(cfg, registry, policies, keys, limiter, auditor, pipeline, metrics)
 	handler.SetShadowAuditor(shadowAuditor)
 	handler.SetReadiness(readiness)
+	handler.SetUpstreamResolver(repo)
+	handler.SetEncryptionKey(encryptionKey)
 	handler.Register(app)
-	if cfg.AdminToken != "" {
+	{
 		admin := fiber.New(fiber.Config{DisableStartupMessage: true})
-		(&httpapi.Admin{Token: cfg.AdminToken, Logger: logger, Pepper: cfg.APIKeyPepper, Repo: repo, Rules: registry, Events: pipeline, Keys: keys, Policies: policies, Audit: auditStore, PolicyChanged: func(ctx context.Context) {
+		(&httpapi.Admin{Logger: logger, EncryptionKey: encryptionKey, Repo: repo, Rules: registry, Events: pipeline, Keys: keys, Policies: policies, Audit: auditStore, PolicyChanged: func(ctx context.Context) {
 			if policyNotifier != nil {
 				policyNotifier.Notify(ctx)
 			}
@@ -272,7 +280,7 @@ func main() {
 			}
 		}()
 	}
-	logger.Info("gateway listening", slog.String("addr", cfg.ListenAddr), slog.String("upstream", cfg.UpstreamURL))
+	logger.Info("gateway listening", slog.String("addr", cfg.ListenAddr))
 	if err := app.Listen(cfg.ListenAddr); err != nil {
 		logger.Error("gateway stopped", slog.Any("error", err))
 	}
