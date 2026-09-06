@@ -30,6 +30,10 @@ Every outbound upstream request — proxied traffic and the admin `test` probe a
 
 Development stacks that run mock upstreams on internal addresses may set `UPSTREAM_ALLOW_PRIVATE_NETWORKS=true`; the gateway refuses to start with it in `GATEWAY_ENV=production`.
 
+## Administrator session hardening
+
+Admin sessions live in PostgreSQL with a configurable TTL (`ADMIN_SESSION_TTL_MS`, default 24h); expired and revoked rows are swept by the retention job. Logins are throttled per source address, and an account locks out after `ADMIN_LOGIN_MAX_FAILURES` (5) wrong passwords for `ADMIN_LOGIN_LOCKOUT_MS` (15 minutes). `POST /admin/v1/auth/password` rotates the password and revokes every other session, and `POST /admin/v1/auth/sessions/logout-all` revokes all of them; login, logout, password changes, and mass revocations are audited. The session cookie's `Secure` attribute follows `ADMIN_COOKIE_SECURE_MODE` (`auto` marks it secure whenever the exchange is https — direct TLS, a forwarded header, or an https trusted origin; `always`; `never`). When `ADMIN_TRUSTED_ORIGINS` is set (for example `https://admin.example.com`), CSRF Origin checks accept exactly those origins and ignore client-controlled `X-Forwarded-*` headers; without it, the legacy forwarded-host check applies and is only safe behind a proxy that overwrites those headers (the compose web service does).
+
 ## ClickHouse audit queries
 
 `go run ./cmd/audit-consumer` consumes the Kafka audit topic into ClickHouse using the consumer group `audit-clickhouse-v1`. Set `CLICKHOUSE_DSN` (the Compose stack derives an authenticated DSN from `CLICKHOUSE_PASSWORD`); events are retained for 180 days and deduplicated by `event_id` at query time. Configure the same DSN on the gateway to enable the admin-only endpoints for paged event search, event detail, and hourly/daily summaries. Consumer failure never changes gateway request readiness.

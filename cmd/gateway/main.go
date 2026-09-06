@@ -266,15 +266,23 @@ func main() {
 	{
 		admin := fiber.New(fiber.Config{DisableStartupMessage: true})
 		upstreamClient := proxy.New(cfg)
-		(&httpapi.Admin{Logger: logger, EncryptionKey: encryptionKey, Repo: repo, Rules: registry, Events: pipeline, Keys: keys, Policies: policies, Audit: auditStore, UpstreamClient: upstreamClient, TargetPolicy: upstreamClient.TargetPolicy(), PolicyChanged: func(ctx context.Context) {
-			if policyNotifier != nil {
-				policyNotifier.Notify(ctx)
-			}
-		}, RuleChanged: func(ctx context.Context, scope string) {
-			if cachedRules != nil {
-				cachedRules.Invalidate(ctx, scope)
-			}
-		}}).Register(admin)
+		(&httpapi.Admin{
+			Logger: logger, EncryptionKey: encryptionKey, Repo: repo, Rules: registry, Events: pipeline, Keys: keys, Policies: policies, Audit: auditStore,
+			UpstreamClient: upstreamClient, TargetPolicy: upstreamClient.TargetPolicy(),
+			SessionTTL:       time.Duration(cfg.AdminSessionTTLMS) * time.Millisecond,
+			CookieSecureMode: cfg.AdminCookieSecureMode,
+			TrustedOrigins:   cfg.AdminTrustedOrigins,
+			LoginMaxFailures: cfg.AdminLoginMaxFailures,
+			LoginLockout:     time.Duration(cfg.AdminLoginLockoutMS) * time.Millisecond,
+			PolicyChanged: func(ctx context.Context) {
+				if policyNotifier != nil {
+					policyNotifier.Notify(ctx)
+				}
+			}, RuleChanged: func(ctx context.Context, scope string) {
+				if cachedRules != nil {
+					cachedRules.Invalidate(ctx, scope)
+				}
+			}}).Register(admin)
 		go func() {
 			logger.Info("admin API listening", slog.String("addr", cfg.AdminAddr))
 			if err := admin.Listen(cfg.AdminAddr); err != nil {
@@ -335,7 +343,7 @@ func runRetentionSweeper(ctx context.Context, cfg config.Config, repo *storage.R
 	if cfg.RetentionSweepIntervalMS <= 0 || repo == nil {
 		return
 	}
-	auditDeleted, outboxDeleted := 0.0, 0.0
+	auditDeleted, outboxDeleted, sessionsDeleted := 0.0, 0.0, 0.0
 	go func() {
 		ticker := time.NewTicker(time.Duration(cfg.RetentionSweepIntervalMS) * time.Millisecond)
 		defer ticker.Stop()
@@ -348,6 +356,15 @@ func runRetentionSweeper(ctx context.Context, cfg config.Config, repo *storage.R
 				auditRows, outboxRows, err := repo.CleanupExpired(sweepCtx,
 					time.Duration(cfg.AuditRecordsRetentionDays)*24*time.Hour,
 					time.Duration(cfg.OutboxRetentionDays)*24*time.Hour, 1000)
+				if err == nil {
+					// Sessions become unusable the moment they expire or are
+					// revoked; the grace only keeps recent sign-out traces.
+					sessionsRows, sessionsErr := repo.CleanupExpiredAdminSessions(sweepCtx, 24*time.Hour, 1000)
+					if sessionsErr != nil {
+						err = sessionsErr
+					}
+					sessionsDeleted += float64(sessionsRows)
+				}
 				cancel()
 				if err != nil {
 					logger.Warn("retention cleanup failed", slog.Any("error", err))
@@ -358,6 +375,7 @@ func runRetentionSweeper(ctx context.Context, cfg config.Config, repo *storage.R
 				outboxDeleted += float64(outboxRows)
 				metrics.Set("audit_retention_rows_deleted", auditDeleted, map[string]string{"table": "audit_records"})
 				metrics.Set("audit_retention_rows_deleted", outboxDeleted, map[string]string{"table": "audit_outbox"})
+				metrics.Set("audit_retention_rows_deleted", sessionsDeleted, map[string]string{"table": "admin_sessions"})
 				metrics.Inc("audit_retention_sweeps_total", map[string]string{"result": "success"})
 				if auditRows > 0 || outboxRows > 0 {
 					logger.Info("retention cleanup", slog.Int64("audit_records", auditRows), slog.Int64("audit_outbox", outboxRows))

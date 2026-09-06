@@ -90,6 +90,35 @@ func (r *Repository) RevokeAdminSession(ctx context.Context, tokenHash []byte) e
 	return err
 }
 
+// UpdateAdminPassword swaps the stored bcrypt hash for the user.
+func (r *Repository) UpdateAdminPassword(ctx context.Context, userID string, passwordHash []byte) error {
+	if r == nil || r.pool == nil {
+		return fmt.Errorf("postgres disabled")
+	}
+	tag, err := r.pool.Exec(ctx, `UPDATE admin_users SET password_hash=$2, updated_at=now() WHERE id=$1`, userID, passwordHash)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("admin user %s not found", userID)
+	}
+	return nil
+}
+
+// RevokeAdminSessions revokes every live session of the user. A non-nil
+// keptTokenHash spares one session — the one that issued the request, so a
+// password change does not force an immediate re-login.
+func (r *Repository) RevokeAdminSessions(ctx context.Context, userID string, keptTokenHash []byte) (int64, error) {
+	if r == nil || r.pool == nil {
+		return 0, fmt.Errorf("postgres disabled")
+	}
+	tag, err := r.pool.Exec(ctx, `UPDATE admin_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE admin_user_id=$1 AND revoked_at IS NULL AND ($2::bytea IS NULL OR token_hash <> $2)`, userID, keptTokenHash)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 func ValidateUpstreamURL(raw string) error {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme != "https" && parsed.Scheme != "http" || parsed.Host == "" || parsed.User != nil {

@@ -46,7 +46,17 @@ type Admin struct {
 	// administrator-configured upstream can cause, including the test probe.
 	UpstreamClient *proxy.Client
 	TargetPolicy   *proxy.TargetPolicy
-	throttle       *authThrottle
+	// Session hardening. Zero values fall back to the historical behavior in
+	// Register: 24h sessions, auto Secure cookies, per-account lockout after
+	// 5 failures for 15 minutes.
+	SessionTTL       time.Duration
+	CookieSecureMode string
+	TrustedOrigins   []string
+	LoginMaxFailures int
+	LoginLockout     time.Duration
+	logins           *loginGuard
+	dummyHash        []byte
+	throttle         *authThrottle
 }
 
 // fail logs the underlying cause and returns a client-safe response. Only
@@ -72,6 +82,19 @@ func (a *Admin) Register(app *fiber.App) {
 	if a.throttle == nil {
 		a.throttle = newAuthThrottle(30, time.Minute)
 	}
+	if a.logins == nil {
+		a.logins = newLoginGuard(a.LoginMaxFailures, a.LoginLockout)
+	}
+	if a.SessionTTL <= 0 {
+		a.SessionTTL = 24 * time.Hour
+	}
+	if a.CookieSecureMode == "" {
+		a.CookieSecureMode = "auto"
+	}
+	if a.dummyHash == nil {
+		// Only consumed to equalize bcrypt timing for unknown usernames.
+		a.dummyHash, _ = bcrypt.GenerateFromPassword([]byte("gateway-timing-equalizer"), bcrypt.DefaultCost)
+	}
 	app.Use(a.csrf)
 	app.Get("/admin/v1/setup/status", a.setupStatus)
 	app.Post("/admin/v1/setup", a.setup)
@@ -79,6 +102,8 @@ func (a *Admin) Register(app *fiber.App) {
 	app.Post("/admin/v1/auth/logout", a.logout)
 	app.Get("/admin/v1/auth/me", a.me)
 	app.Use(a.authenticate)
+	app.Post("/admin/v1/auth/password", a.changePassword)
+	app.Post("/admin/v1/auth/sessions/logout-all", a.logoutAll)
 	app.Post("/admin/v1/rule-sets", a.create)
 	app.Get("/admin/v1/rule-sets", a.list)
 	app.Get("/admin/v1/rule-sets/:version", a.get)
@@ -108,6 +133,7 @@ type AuditReader interface {
 }
 
 const adminSessionCookie = "gateway_admin_session"
+const adminCSRFCookie = "gateway_admin_csrf"
 
 var errMissingSessionCookie = errors.New("session cookie is missing")
 
@@ -172,17 +198,77 @@ func (a *Admin) csrf(c *fiber.Ctx) error {
 	}
 	origin := c.Get("Origin")
 	if origin != "" {
-		u, err := url.Parse(origin)
-		if err == nil && sameOrigin(c, u) {
+		if a.originAllowed(c, origin) {
 			return c.Next()
 		}
+		return fiber.NewError(fiber.StatusForbidden, "csrf validation failed")
 	}
-	csrfCookie := c.Cookies("gateway_admin_csrf")
+	csrfCookie := c.Cookies(adminCSRFCookie)
 	csrfHeader := c.Get("X-CSRF-Token")
 	if csrfCookie != "" && csrfHeader != "" && subtle.ConstantTimeCompare([]byte(csrfCookie), []byte(csrfHeader)) == 1 {
 		return c.Next()
 	}
 	return fiber.NewError(fiber.StatusForbidden, "csrf validation failed")
+}
+
+// originAllowed decides whether a request Origin may write. With trusted
+// origins configured, only exact scheme+host matches pass and forwarded
+// headers are ignored — an untrusted proxy can no longer forge acceptance.
+// Without configuration, the legacy same-origin check against
+// X-Forwarded-Host applies, which is safe only behind a proxy that overwrites
+// those headers (the compose web service does).
+func (a *Admin) originAllowed(c *fiber.Ctx, origin string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false
+	}
+	if len(a.TrustedOrigins) > 0 {
+		for _, trusted := range a.TrustedOrigins {
+			entry, parseErr := url.Parse(strings.TrimSpace(trusted))
+			if parseErr != nil {
+				continue
+			}
+			if strings.EqualFold(entry.Scheme, parsed.Scheme) && strings.EqualFold(entry.Host, parsed.Host) {
+				return true
+			}
+		}
+		return false
+	}
+	return sameOrigin(c, parsed)
+}
+
+// cookieSecure decides the Secure attribute. "auto" marks the cookie Secure
+// whenever https is plausible: direct TLS, a forwarded https header, or an
+// https trusted origin. Over-marking only makes the cookie unavailable over
+// plain HTTP, while under-marking would leak it, so the safer side wins.
+func (a *Admin) cookieSecure(c *fiber.Ctx) bool {
+	switch a.CookieSecureMode {
+	case "always":
+		return true
+	case "never":
+		return false
+	}
+	if c.Secure() || strings.EqualFold(c.Get("X-Forwarded-Proto"), "https") {
+		return true
+	}
+	for _, origin := range a.TrustedOrigins {
+		if parsed, err := url.Parse(origin); err == nil && strings.EqualFold(parsed.Scheme, "https") {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Admin) sessionTTL() time.Duration {
+	if a.SessionTTL > 0 {
+		return a.SessionTTL
+	}
+	return 24 * time.Hour
+}
+
+// throttled mirrors the proxy handler's rate-limit error shape.
+func throttled(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": fiber.Map{"message": "too many attempts; try again later", "type": "rate_limit_error", "code": "rate_limited"}})
 }
 
 func (a *Admin) setupStatus(c *fiber.Ctx) error {
@@ -229,6 +315,9 @@ func (a *Admin) login(c *fiber.Ctx) error {
 	if a.Repo == nil {
 		return fiber.ErrServiceUnavailable
 	}
+	if a.throttle.blocked(c.IP()) {
+		return throttled(c)
+	}
 	var input struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -236,10 +325,23 @@ func (a *Admin) login(c *fiber.Ctx) error {
 	if err := c.BodyParser(&input); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
+	if a.logins.blocked(input.Username) {
+		a.emitOperation(c, "admin_login", "", "throttled", "")
+		return throttled(c)
+	}
 	user, hash, err := a.Repo.GetAdminUser(c.UserContext(), input.Username)
-	if err != nil || bcrypt.CompareHashAndPassword(hash, []byte(input.Password)) != nil {
+	if err != nil {
+		// Unknown username still burns one bcrypt comparison so response
+		// timing does not reveal which accounts exist.
+		_ = bcrypt.CompareHashAndPassword(a.dummyHash, []byte(input.Password))
+		a.loginFailed(c, input.Username)
 		return fiber.NewError(fiber.StatusUnauthorized, "invalid credentials")
 	}
+	if bcrypt.CompareHashAndPassword(hash, []byte(input.Password)) != nil {
+		a.loginFailed(c, input.Username)
+		return fiber.NewError(fiber.StatusUnauthorized, "invalid credentials")
+	}
+	a.logins.success(input.Username)
 	raw := make([]byte, 32)
 	if _, err = rand.Read(raw); err != nil {
 		return a.fail("admin_session_generate", err)
@@ -250,22 +352,102 @@ func (a *Admin) login(c *fiber.Ctx) error {
 		return a.fail("admin_csrf_generate", err)
 	}
 	csrfToken := base64.RawURLEncoding.EncodeToString(csrfRaw)
-	if _, err = a.Repo.CreateAdminSession(c.UserContext(), user.ID, sessionHash(token), time.Now().Add(24*time.Hour)); err != nil {
+	ttl := a.sessionTTL()
+	if _, err = a.Repo.CreateAdminSession(c.UserContext(), user.ID, sessionHash(token), time.Now().Add(ttl)); err != nil {
 		return a.fail("admin_session_create", err)
 	}
-	c.Cookie(&fiber.Cookie{Name: adminSessionCookie, Value: token, HTTPOnly: true, Secure: false, SameSite: "Lax", Path: "/", MaxAge: 86400})
-	c.Cookie(&fiber.Cookie{Name: "gateway_admin_csrf", Value: csrfToken, HTTPOnly: false, Secure: false, SameSite: "Lax", Path: "/", MaxAge: 86400})
+	secure := a.cookieSecure(c)
+	maxAge := int(ttl / time.Second)
+	c.Cookie(&fiber.Cookie{Name: adminSessionCookie, Value: token, HTTPOnly: true, Secure: secure, SameSite: "Lax", Path: "/", MaxAge: maxAge})
+	c.Cookie(&fiber.Cookie{Name: adminCSRFCookie, Value: csrfToken, HTTPOnly: false, Secure: secure, SameSite: "Lax", Path: "/", MaxAge: maxAge})
+	c.Locals("admin_user", user)
+	a.emitOperation(c, "admin_login", "", "success", "")
 	return c.JSON(user)
+}
+
+// loginFailed feeds both throttles and leaves an audit trace; the response it
+// accompanies reveals nothing about which limit fired.
+func (a *Admin) loginFailed(c *fiber.Ctx, username string) {
+	a.throttle.fail(c.IP())
+	a.logins.fail(username)
+	a.emitOperation(c, "admin_login", "", "failure", "")
 }
 
 func (a *Admin) logout(c *fiber.Ctx) error {
 	if token := c.Cookies(adminSessionCookie); token != "" && a.Repo != nil {
+		_, user, userErr := a.Repo.GetAdminSession(c.UserContext(), sessionHash(token))
 		if err := a.Repo.RevokeAdminSession(c.UserContext(), sessionHash(token)); err != nil {
 			return a.fail("admin_logout", err)
 		}
+		if userErr == nil {
+			c.Locals("admin_user", user)
+		}
 	}
+	a.emitOperation(c, "admin_logout", "", "success", "")
 	c.ClearCookie(adminSessionCookie)
-	c.ClearCookie("gateway_admin_csrf")
+	c.ClearCookie(adminCSRFCookie)
+	return c.SendStatus(http.StatusNoContent)
+}
+
+// changePassword rotates the administrator password and revokes every other
+// live session so stolen cookies die with the old credential. The current
+// session survives so the caller is not logged out mid-flow.
+func (a *Admin) changePassword(c *fiber.Ctx) error {
+	if a.Repo == nil {
+		return fiber.ErrServiceUnavailable
+	}
+	user, ok := c.Locals("admin_user").(storage.AdminUser)
+	if !ok {
+		return fiber.ErrUnauthorized
+	}
+	var input struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := c.BodyParser(&input); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	if len(input.NewPassword) < 12 {
+		return fiber.NewError(fiber.StatusBadRequest, "new password must be at least 12 characters")
+	}
+	_, hash, err := a.Repo.GetAdminUser(c.UserContext(), user.Username)
+	if err != nil || bcrypt.CompareHashAndPassword(hash, []byte(input.CurrentPassword)) != nil {
+		return fiber.NewError(fiber.StatusUnauthorized, "current password is incorrect")
+	}
+	newHash, err := bcrypt.GenerateFromPassword([]byte(input.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return a.fail("admin_password_hash", err)
+	}
+	if err = a.Repo.UpdateAdminPassword(c.UserContext(), user.ID, newHash); err != nil {
+		return a.fail("admin_password_update", err)
+	}
+	var kept []byte
+	if token := c.Cookies(adminSessionCookie); token != "" {
+		kept = sessionHash(token)
+	}
+	if _, err = a.Repo.RevokeAdminSessions(c.UserContext(), user.ID, kept); err != nil {
+		return a.fail("admin_session_revoke", err)
+	}
+	a.emitOperation(c, "admin_password_change", "", "success", "")
+	return c.SendStatus(http.StatusNoContent)
+}
+
+// logoutAll revokes every session of the administrator, including the one
+// that issued the request.
+func (a *Admin) logoutAll(c *fiber.Ctx) error {
+	if a.Repo == nil {
+		return fiber.ErrServiceUnavailable
+	}
+	user, ok := c.Locals("admin_user").(storage.AdminUser)
+	if !ok {
+		return fiber.ErrUnauthorized
+	}
+	if _, err := a.Repo.RevokeAdminSessions(c.UserContext(), user.ID, nil); err != nil {
+		return a.fail("admin_session_revoke_all", err)
+	}
+	a.emitOperation(c, "admin_session_revoke_all", "", "success", "")
+	c.ClearCookie(adminSessionCookie)
+	c.ClearCookie(adminCSRFCookie)
 	return c.SendStatus(http.StatusNoContent)
 }
 

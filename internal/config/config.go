@@ -33,6 +33,11 @@ type Config struct {
 	ClickHouseDSN                string
 	ConsumerListenAddr           string
 	EncryptionKeyFile            string
+	AdminSessionTTLMS            int
+	AdminCookieSecureMode        string
+	AdminTrustedOrigins          []string
+	AdminLoginMaxFailures        int
+	AdminLoginLockoutMS          int
 	RateLimitRPS                 int
 	RateLimitBurst               int
 	AuditorURL                   string
@@ -93,6 +98,11 @@ func Load() (Config, error) {
 		ClickHouseDSN:                os.Getenv("CLICKHOUSE_DSN"),
 		ConsumerListenAddr:           env("AUDIT_CONSUMER_LISTEN_ADDR", ":9090"),
 		EncryptionKeyFile:            env("GATEWAY_ENCRYPTION_KEY_FILE", "/var/lib/gateway/keys/encryption.key"),
+		AdminSessionTTLMS:            intOpt("ADMIN_SESSION_TTL_MS", 86400000),
+		AdminCookieSecureMode:        strings.ToLower(env("ADMIN_COOKIE_SECURE_MODE", "auto")),
+		AdminTrustedOrigins:          envList("ADMIN_TRUSTED_ORIGINS"),
+		AdminLoginMaxFailures:        intOpt("ADMIN_LOGIN_MAX_FAILURES", 5),
+		AdminLoginLockoutMS:          intOpt("ADMIN_LOGIN_LOCKOUT_MS", 900000),
 
 		RateLimitRPS:              intOpt("RATE_LIMIT_RPS", 60),
 		RateLimitBurst:            intOpt("RATE_LIMIT_BURST", 120),
@@ -128,6 +138,17 @@ func (c Config) Validate() error {
 	}
 	if c.UpstreamAllowPrivateNetworks && c.Environment == "production" {
 		return fmt.Errorf("UPSTREAM_ALLOW_PRIVATE_NETWORKS is not allowed in production")
+	}
+	if c.AdminCookieSecureMode == "" {
+		c.AdminCookieSecureMode = "auto"
+	}
+	if c.AdminCookieSecureMode != "auto" && c.AdminCookieSecureMode != "always" && c.AdminCookieSecureMode != "never" {
+		return fmt.Errorf("ADMIN_COOKIE_SECURE_MODE must be auto, always, or never")
+	}
+	for _, origin := range c.AdminTrustedOrigins {
+		if !strings.Contains(origin, "://") {
+			return fmt.Errorf("ADMIN_TRUSTED_ORIGINS entries must include a scheme, e.g. https://admin.example.com")
+		}
 	}
 	if c.PostgresURL == "" {
 		return fmt.Errorf("POSTGRES_URL is required for gateway identity and administration")
