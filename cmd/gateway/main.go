@@ -104,6 +104,7 @@ func main() {
 			allowGenerate, _ = strconv.ParseBool(raw)
 		}
 		if cfg.Environment == "production" && !allowGenerate {
+			removeGeneratedEncryptionKey(cfg.EncryptionKeyFile, logger)
 			logger.Error("a new gateway encryption key was generated; production refuses implicit key generation — restore the key file into GATEWAY_ENCRYPTION_KEY_FILE or set GATEWAY_ENCRYPTION_KEY_ALLOW_GENERATE=true if no secrets exist yet")
 			return
 		}
@@ -116,6 +117,7 @@ func main() {
 			return
 		}
 		if orphaned {
+			removeGeneratedEncryptionKey(cfg.EncryptionKeyFile, logger)
 			logger.Error("the gateway encryption key file was missing and has been regenerated; stored upstream API keys can no longer be decrypted. Restore the original key file (the gateway-keys volume and PostgreSQL are one recovery unit), or delete the affected upstreams and re-enter their keys")
 			return
 		}
@@ -317,6 +319,12 @@ func main() {
 	logger.Info("gateway listening", slog.String("addr", cfg.ListenAddr))
 	if err := app.Listen(cfg.ListenAddr); err != nil {
 		logger.Error("gateway stopped", slog.Any("error", err))
+	}
+}
+
+func removeGeneratedEncryptionKey(path string, logger *slog.Logger) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		logger.Error("remove rejected generated encryption key", slog.Any("error", err))
 	}
 }
 

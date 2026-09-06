@@ -23,6 +23,16 @@ docker compose -p audit-gateway exec -T postgres \
 
 Restore: recreate the volumes, restore the key files into `gateway-keys`, then `gunzip -c postgres-….sql.gz | docker compose exec -T postgres psql -U audit -d audit_gateway` before starting the gateway.
 
+On Windows with Git Bash, Docker bind mounts need a Windows-style path. Convert the backup directory before mounting it:
+
+```bash
+BACKUP_DIR=$(cygpath -m "$PWD/backups")
+docker run --rm -v audit-gateway_gateway-keys:/keys:ro -v "$BACKUP_DIR:/backup" alpine \
+  tar czf /backup/gateway-keys.tgz -C /keys .
+```
+
+The recovery procedure was exercised against an isolated Compose project on 2026-09-06: after destroying both volumes, restoring the key archive plus PostgreSQL dump preserved administrator login, gateway-key routing, and decryption of the stored upstream API key. The lost-key case was also exercised: the gateway remains in a restart loop with the explicit recovery error and removes each rejected newly generated key so `restart: unless-stopped` cannot bypass the guard on its next attempt.
+
 Keep the master key out of git, out of CI logs, and out of shell history. File mode must stay 0600 with a 0700 parent directory (the gateway enforces both on load).
 
 ## Lost master key
