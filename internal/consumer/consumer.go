@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
+	"strconv"
 	"time"
 
 	"github.com/example/ai-audit-gateway/internal/audit"
@@ -65,6 +67,9 @@ func (c *Consumer) Close() error {
 func (c *Consumer) Run(ctx context.Context) error {
 	if c == nil {
 		return fmt.Errorf("consumer disabled")
+	}
+	if err := c.ensureTopic(ctx); err != nil {
+		return err
 	}
 	if err := c.ensureSchema(ctx); err != nil {
 		return err
@@ -154,6 +159,52 @@ func (c *Consumer) sampleStats(ctx context.Context) {
 			c.metrics.Set("audit_kafka_consumer_fetch_errors", float64(stats.Errors), nil)
 		}
 	}
+}
+
+// ensureTopic creates the audit topic when it does not exist yet. A consumer
+// group that joins before the topic exists receives an empty partition
+// assignment and would starve forever, so the topic must precede the first
+// fetch. CreateTopics is idempotent; production deployments that pre-create
+// the topic with custom replication simply skip the creation call.
+func (c *Consumer) ensureTopic(ctx context.Context) error {
+	for {
+		probe, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := c.createTopic(probe)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		c.metrics.Inc("audit_clickhouse_consumer_topic_total", map[string]string{"result": "error"})
+		c.logger.Warn("ensure kafka audit topic", slog.Any("error", err))
+		if !wait(ctx, time.Second) {
+			return ctx.Err()
+		}
+	}
+}
+
+func (c *Consumer) createTopic(ctx context.Context) error {
+	conn, err := kafka.DialContext(ctx, "tcp", c.config.Brokers[0])
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	controller, err := conn.Controller()
+	if err != nil {
+		return err
+	}
+	controllerConn, err := kafka.DialContext(ctx, "tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = controllerConn.Close() }()
+	return controllerConn.CreateTopics(kafka.TopicConfig{
+		Topic:             c.config.Topic,
+		NumPartitions:     1,
+		ReplicationFactor: 1,
+	})
 }
 
 func (c *Consumer) ensureSchema(ctx context.Context) error {
