@@ -31,7 +31,7 @@ func TestSSEBlockReportsStartedResponseAndDoesNotWriteMatchedEvent(t *testing.T)
 		_, _ = io.WriteString(w, raw)
 	}))
 	defer upstream.Close()
-	client := New(config.Config{RequestTimeoutMS: 1000})
+	client := New(config.Config{UpstreamAllowPrivateNetworks: true, RequestTimeoutMS: 1000})
 	var destination bytes.Buffer
 	headerCalls := 0
 	err := client.DoUpstream(context.Background(), Upstream{BaseURL: upstream.URL, Enabled: true}, http.MethodPost, "/v1/chat/completions", "", nil, nil, &destination, func(int, http.Header) {
@@ -53,7 +53,7 @@ func TestNonSSEInspectionRunsBeforeHeadersAndBody(t *testing.T) {
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	}))
 	defer upstream.Close()
-	client := New(config.Config{RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
+	client := New(config.Config{UpstreamAllowPrivateNetworks: true, RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
 	var destination bytes.Buffer
 	inspected := false
 	headersStarted := false
@@ -90,7 +90,7 @@ func TestClientAcceptEncodingNeverReachesUpstream(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer upstream.Close()
-	client := New(config.Config{RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
+	client := New(config.Config{UpstreamAllowPrivateNetworks: true, RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
 	headers := http.Header{}
 	headers.Set("Accept-Encoding", "br")
 	var destination bytes.Buffer
@@ -112,7 +112,7 @@ func TestUnsolicitedGzipResponseIsDecompressedForAudit(t *testing.T) {
 		_ = gzipWriter.Close()
 	}))
 	defer upstream.Close()
-	client := New(config.Config{RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
+	client := New(config.Config{UpstreamAllowPrivateNetworks: true, RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
 	var destination bytes.Buffer
 	var forwarded http.Header
 	err := client.DoUpstream(context.Background(), Upstream{BaseURL: upstream.URL, Enabled: true}, http.MethodPost, "/v1/chat/completions", "", nil, nil, &destination, func(_ int, headers http.Header) {
@@ -136,7 +136,7 @@ func TestQueryStringsAreForwardedUpstream(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer upstream.Close()
-	client := New(config.Config{RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
+	client := New(config.Config{UpstreamAllowPrivateNetworks: true, RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
 	var destination bytes.Buffer
 	if err := client.DoUpstream(context.Background(), Upstream{BaseURL: upstream.URL, Enabled: true}, http.MethodPost, "/v1/chat/completions", "api-version=2024-01&user=alice", nil, nil, &destination, nil, nil, nil); err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestPathTraversalCannotEscapeV1Boundary(t *testing.T) {
 		_, _ = w.Write([]byte(r.URL.Path))
 	}))
 	defer upstream.Close()
-	client := New(config.Config{RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
+	client := New(config.Config{UpstreamAllowPrivateNetworks: true, RequestTimeoutMS: 1000, MaxResponseBytes: 1024})
 	for _, path := range []string{"/v1/%2e%2e/admin", "/v1/../admin"} {
 		var destination bytes.Buffer
 		err := client.DoUpstream(context.Background(), Upstream{BaseURL: upstream.URL, Enabled: true}, http.MethodPost, path, "", nil, nil, &destination, nil, nil, nil)

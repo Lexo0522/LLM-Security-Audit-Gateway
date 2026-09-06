@@ -21,7 +21,7 @@ func TestReadyzUsesComponentReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := fiber.New()
-	handler := New(config.Config{}, registry, policy.NewResolver(nil), nil, ratelimit.MemoryLimiter{}, nil, nil)
+	handler := New(config.Config{UpstreamAllowPrivateNetworks: true}, registry, policy.NewResolver(nil), nil, ratelimit.MemoryLimiter{}, nil, nil)
 	readiness := health.New(time.Hour, time.Second, nil)
 	readiness.Add("postgres", true, func(context.Context) (map[string]any, error) { return map[string]any{"identity": "ok"}, nil })
 	readiness.Add("rules", true, func(context.Context) (map[string]any, error) {

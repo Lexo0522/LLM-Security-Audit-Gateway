@@ -18,6 +18,7 @@ import (
 	"github.com/example/ai-audit-gateway/internal/httpapi"
 	"github.com/example/ai-audit-gateway/internal/observability"
 	"github.com/example/ai-audit-gateway/internal/policy"
+	"github.com/example/ai-audit-gateway/internal/proxy"
 	"github.com/example/ai-audit-gateway/internal/ratelimit"
 	"github.com/example/ai-audit-gateway/internal/rule"
 	"github.com/example/ai-audit-gateway/internal/storage"
@@ -264,7 +265,8 @@ func main() {
 	handler.Register(app)
 	{
 		admin := fiber.New(fiber.Config{DisableStartupMessage: true})
-		(&httpapi.Admin{Logger: logger, EncryptionKey: encryptionKey, Repo: repo, Rules: registry, Events: pipeline, Keys: keys, Policies: policies, Audit: auditStore, PolicyChanged: func(ctx context.Context) {
+		upstreamClient := proxy.New(cfg)
+		(&httpapi.Admin{Logger: logger, EncryptionKey: encryptionKey, Repo: repo, Rules: registry, Events: pipeline, Keys: keys, Policies: policies, Audit: auditStore, UpstreamClient: upstreamClient, TargetPolicy: upstreamClient.TargetPolicy(), PolicyChanged: func(ctx context.Context) {
 			if policyNotifier != nil {
 				policyNotifier.Notify(ctx)
 			}

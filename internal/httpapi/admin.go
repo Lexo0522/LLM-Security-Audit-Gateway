@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/example/ai-audit-gateway/internal/proxy"
 
 	internalcrypto "github.com/example/ai-audit-gateway/internal/crypto"
 
@@ -39,7 +42,11 @@ type Admin struct {
 	Policies      *policy.Resolver
 	PolicyChanged func(context.Context)
 	Audit         AuditReader
-	throttle      *authThrottle
+	// UpstreamClient and its TargetPolicy guard every outbound request an
+	// administrator-configured upstream can cause, including the test probe.
+	UpstreamClient *proxy.Client
+	TargetPolicy   *proxy.TargetPolicy
+	throttle       *authThrottle
 }
 
 // fail logs the underlying cause and returns a client-safe response. Only
@@ -410,6 +417,9 @@ func (a *Admin) createUpstream(c *fiber.Ctx) error {
 	if input.Enabled != nil {
 		enabled = *input.Enabled
 	}
+	if err := a.checkTarget(c, input.BaseURL); err != nil {
+		return err
+	}
 	value, err := a.Repo.CreateUpstream(c.UserContext(), input.Name, input.BaseURL, input.APIKey, enabled, a.EncryptionKey)
 	if err != nil {
 		return a.fail("upstream_create", err)
@@ -431,6 +441,9 @@ func (a *Admin) updateUpstream(c *fiber.Ctx) error {
 	if err := c.BodyParser(&input); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
+	if err := a.checkTarget(c, input.BaseURL); err != nil {
+		return err
+	}
 	value, err := a.Repo.UpdateUpstream(c.UserContext(), c.Params("id"), input.Name, input.BaseURL, input.APIKey, input.Enabled, a.EncryptionKey)
 	if err != nil {
 		return a.fail("upstream_update", err)
@@ -451,7 +464,7 @@ func (a *Admin) deleteUpstream(c *fiber.Ctx) error {
 }
 
 func (a *Admin) testUpstream(c *fiber.Ctx) error {
-	if a.Repo == nil {
+	if a.Repo == nil || a.UpstreamClient == nil {
 		return fiber.ErrServiceUnavailable
 	}
 	value, err := a.Repo.GetUpstream(c.UserContext(), c.Params("id"), a.EncryptionKey)
@@ -461,23 +474,34 @@ func (a *Admin) testUpstream(c *fiber.Ctx) error {
 	if !value.Enabled {
 		return fiber.NewError(http.StatusServiceUnavailable, "upstream is disabled")
 	}
-	u, err := url.Parse(value.BaseURL)
+	ctx, cancel := context.WithTimeout(c.UserContext(), 10*time.Second)
+	defer cancel()
+	var status int
+	err = a.UpstreamClient.DoUpstream(ctx, proxy.Upstream{BaseURL: value.BaseURL, APIKey: value.APIKey, Enabled: value.Enabled}, http.MethodGet, "/v1/models", "", nil, nil, io.Discard, func(code int, _ http.Header) { status = code }, nil, nil)
 	if err != nil {
-		return a.fail("upstream_test_url", err)
-	}
-	req, err := http.NewRequestWithContext(c.UserContext(), http.MethodGet, strings.TrimRight(u.String(), "/")+"/v1/models", nil)
-	if err != nil {
-		return a.fail("upstream_test_request", err)
-	}
-	if value.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+value.APIKey)
-	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
+		// The cause stays in the logs — it can name internal targets — and
+		// only a generic message reaches the caller.
+		logger := a.Logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("upstream test request failed", slog.Any("error", err))
 		return c.Status(http.StatusBadGateway).JSON(fiber.Map{"ok": false, "message": "upstream unavailable"})
 	}
-	defer resp.Body.Close()
-	return c.JSON(fiber.Map{"ok": resp.StatusCode >= 200 && resp.StatusCode < 500, "status": resp.StatusCode})
+	return c.JSON(fiber.Map{"ok": status >= 200 && status < 500, "status": status})
+}
+
+// checkTarget applies the SSRF policy to an administrator-supplied upstream
+// URL before it is stored. The response carries only a fixed message; the
+// denial category is in the log.
+func (a *Admin) checkTarget(c *fiber.Ctx, rawURL string) error {
+	if a.TargetPolicy == nil {
+		return nil
+	}
+	if err := a.TargetPolicy.ValidateTarget(c.UserContext(), rawURL); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "upstream target not allowed")
+	}
+	return nil
 }
 
 func (a *Admin) createPolicy(c *fiber.Ctx) error {

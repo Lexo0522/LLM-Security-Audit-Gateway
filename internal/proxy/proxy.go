@@ -28,8 +28,9 @@ type InspectionBlockedError struct {
 func (e *InspectionBlockedError) Error() string { return "upstream response blocked by audit policy" }
 
 type Client struct {
-	cfg  config.Config
-	http *http.Client
+	cfg    config.Config
+	http   *http.Client
+	policy *TargetPolicy
 }
 
 // Upstream is an immutable, server-resolved upstream configuration. It is never
@@ -47,10 +48,15 @@ func New(cfg config.Config) *Client {
 	// by a large idle pool, stalls before first response byte are capped by
 	// ResponseHeaderTimeout, and no overall Client.Timeout is set because it
 	// would kill long-lived SSE responses mid-stream. Non-streaming requests
-	// get an overall timeout from the handler.
+	// get an overall timeout from the handler. The dialer is wrapped by the
+	// SSRF guard so every connection is resolved and validated locally.
+	policy := NewTargetPolicy(cfg)
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&safeDialer{
+			policy: policy,
+			dialer: &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second},
+		}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          256,
 		MaxIdleConnsPerHost:   64,
@@ -60,8 +66,12 @@ func New(cfg config.Config) *Client {
 		ExpectContinueTimeout: time.Second,
 		ResponseHeaderTimeout: time.Duration(cfg.RequestTimeoutMS) * time.Millisecond,
 	}
-	return &Client{cfg: cfg, http: &http.Client{Transport: transport}}
+	return &Client{cfg: cfg, http: &http.Client{Transport: transport, CheckRedirect: policy.redirectPolicy()}, policy: policy}
 }
+
+// TargetPolicy exposes the guard so management handlers can pre-check
+// configured URLs with the same rules the dialer enforces.
+func (c *Client) TargetPolicy() *TargetPolicy { return c.policy }
 
 func (c *Client) DoUpstream(ctx context.Context, upstream Upstream, method, path, query string, body []byte, headers http.Header, dst io.Writer, onHeaders func(int, http.Header), inspectResponse func([]byte) bool, inspectSSE stream.Inspector) error {
 	if !upstream.Enabled || strings.TrimSpace(upstream.BaseURL) == "" {

@@ -98,7 +98,7 @@ func TestPublicRequestUsesAuthenticatedTenant(t *testing.T) {
 	}))
 	defer upstream.Close()
 	app := fiber.New()
-	h := testHandler(t, config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024}, testAuthenticator{identity: auth.Identity{TenantID: "trusted-tenant", APIKeyID: "key-1", UpstreamID: testUpstreamURL}})
+	h := testHandler(t, config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024}, testAuthenticator{identity: auth.Identity{TenantID: "trusted-tenant", APIKeyID: "key-1", UpstreamID: testUpstreamURL}})
 	h.Register(app)
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test"}`))
 	req.Header.Set("Authorization", "Bearer client-key")
@@ -128,7 +128,7 @@ func TestPublicRequestRejectsInvalidRevokedAndUnavailableIdentity(t *testing.T) 
 		t.Run(name, func(t *testing.T) {
 			called = false
 			app := fiber.New()
-			testHandler(t, config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024}, authResult).Register(app)
+			testHandler(t, config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024}, authResult).Register(app)
 			response, err := app.Test(httptest.NewRequest("POST", "/v1/chat/completions", nil))
 			if err != nil {
 				t.Fatal(err)
@@ -160,7 +160,7 @@ func TestRedactDoesNotRewriteProxiedBody(t *testing.T) {
 	upstream := newTestUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.Copy(w, r.Body) }))
 	defer upstream.Close()
 	app := fiber.New()
-	NewBound(config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, resolver, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "key-a", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
+	NewBound(config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, resolver, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "key-a", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
 	response, err := app.Test(httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"prompt":"needle"}`)))
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +191,7 @@ func TestPolicyActionsAndAuditorFailureMode(t *testing.T) {
 			t.Fatal(err)
 		}
 		app := fiber.New()
-		NewBound(config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true, AuditorURL: "http://auditor"}, registry, resolver, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, failingAuditor{}, nil).Register(app)
+		NewBound(config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true, AuditorURL: "http://auditor"}, registry, resolver, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, failingAuditor{}, nil).Register(app)
 		response, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"prompt":"monitor-me"}`)))
 		if err != nil {
 			t.Fatal(err)
@@ -212,7 +212,7 @@ func TestPolicyActionsAndAuditorFailureMode(t *testing.T) {
 		}))
 		defer upstream.Close()
 		app := fiber.New()
-		NewBound(config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
+		NewBound(config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
 		response, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
 		if err != nil {
 			t.Fatal(err)
@@ -232,7 +232,7 @@ func TestSSEAllowsSemanticContentUnchanged(t *testing.T) {
 	}))
 	defer upstream.Close()
 	app := fiber.New()
-	testHandler(t, config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}).Register(app)
+	testHandler(t, config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}).Register(app)
 	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test"}`)))
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +264,7 @@ func TestSSECrossEventBlockTerminatesAndCancelsUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := fiber.New()
-	NewBound(config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true, SSEAuditWindowBytes: 16}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "key-a", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
+	NewBound(config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true, SSEAuditWindowBytes: 16}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "key-a", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test"}`))
 	req.Header.Set("X-Request-ID", "request-stream-block")
 	response, err := app.Test(req)
@@ -299,7 +299,7 @@ func TestSSERedactKeepsOriginalEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := fiber.New()
-	NewBound(config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
+	NewBound(config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
 	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test"}`)))
 	if err != nil {
 		t.Fatal(err)
@@ -318,7 +318,7 @@ func TestSSEEventLimitTerminatesWithoutForwardingOversizedEvent(t *testing.T) {
 	}))
 	defer upstream.Close()
 	app := fiber.New()
-	testHandler(t, config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true, SSEMaxEventBytes: 64}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}).Register(app)
+	testHandler(t, config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true, SSEMaxEventBytes: 64}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}).Register(app)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test"}`))
 	req.Header.Set("X-Request-ID", "request-event-limit")
 	response, err := app.Test(req)
@@ -347,7 +347,7 @@ func TestSSEAuditEventsIncludeChannelAndRedactEvidence(t *testing.T) {
 	sink := &handlerMemorySink{}
 	pipeline := events.NewPipeline(4, sink, nil)
 	app := fiber.New()
-	NewBound(config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, pipeline).Register(app)
+	NewBound(config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, pipeline).Register(app)
 	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test"}`)))
 	if err != nil {
 		t.Fatal(err)
@@ -387,7 +387,7 @@ func TestResponsesSSECrossEventBlockTerminatesAndCancelsUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := fiber.New()
-	NewBound(config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true, SSEAuditWindowBytes: 16}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "key-a", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
+	NewBound(config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true, SSEAuditWindowBytes: 16}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "key-a", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test","stream":true}`))
 	req.Header.Set("X-Request-ID", "request-responses-block")
 	response, err := app.Test(req)
@@ -424,7 +424,7 @@ func TestResponsesSSERedactPreservesRawEventAndAuditMetadata(t *testing.T) {
 	sink := &handlerMemorySink{}
 	pipeline := events.NewPipeline(4, sink, nil)
 	app := fiber.New()
-	NewBound(config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, pipeline).Register(app)
+	NewBound(config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, pipeline).Register(app)
 	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test","stream":true}`)))
 	if err != nil {
 		t.Fatal(err)
@@ -462,7 +462,7 @@ func TestResponsesRouteSpecificPolicyApplies(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := fiber.New()
-	NewBound(config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, resolver, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
+	NewBound(config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, registry, resolver, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil).Register(app)
 	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test","stream":true}`)))
 	if err != nil {
 		t.Fatal(err)
@@ -482,7 +482,7 @@ func TestMetricsEndpointUsesPrometheusText(t *testing.T) {
 	metrics := observability.NewMetrics()
 	metrics.Inc("audit_events_enqueued_total", nil)
 	app := fiber.New()
-	NewBound(config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024}, registry, policy.NewResolver(nil), testAuthenticator{}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil, metrics).Register(app)
+	NewBound(config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024}, registry, policy.NewResolver(nil), testAuthenticator{}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, nil, metrics).Register(app)
 	response, err := app.Test(httptest.NewRequest("GET", "/metrics", nil))
 	if err != nil {
 		t.Fatal(err)
@@ -551,7 +551,7 @@ func TestGzipRequestBodyIsAuditedAndBlocked(t *testing.T) {
 	upstream := newTestUpstream(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
 	defer upstream.Close()
 	app := fiber.New()
-	testHandler(t, config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}).Register(app)
+	testHandler(t, config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}).Register(app)
 	base := serveOnEphemeralPort(t, app)
 	response := postGzip(t, base, "gzip", gzipBody(t, `{"messages":[{"role":"user","content":"needle hidden in gzip"}]}`))
 	if response.StatusCode != http.StatusForbidden {
@@ -573,7 +573,7 @@ func TestGzipRequestBodyForwardedDecoded(t *testing.T) {
 	}))
 	defer upstream.Close()
 	app := fiber.New()
-	testHandler(t, config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}).Register(app)
+	testHandler(t, config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}).Register(app)
 	base := serveOnEphemeralPort(t, app)
 	response := postGzip(t, base, "gzip", gzipBody(t, plaintext))
 	if response.StatusCode != http.StatusOK {
@@ -589,7 +589,7 @@ func TestBrotliRequestBodyIsAuditedAndBlocked(t *testing.T) {
 	upstream := newTestUpstream(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
 	defer upstream.Close()
 	app := fiber.New()
-	testHandler(t, config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}).Register(app)
+	testHandler(t, config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}).Register(app)
 	base := serveOnEphemeralPort(t, app)
 	var buffer bytes.Buffer
 	writer := brotli.NewWriter(&buffer)
@@ -608,7 +608,7 @@ func TestUnsupportedAndMalformedRequestEncodingRejected(t *testing.T) {
 	upstream := newTestUpstream(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer upstream.Close()
 	app := fiber.New()
-	testHandler(t, config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}).Register(app)
+	testHandler(t, config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: true}, testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}).Register(app)
 	base := serveOnEphemeralPort(t, app)
 	for name, request := range map[string]struct {
 		body     []byte
@@ -642,7 +642,7 @@ func TestAuditDisabledProxiesWithoutAuditing(t *testing.T) {
 	sink := &handlerMemorySink{}
 	pipeline := events.NewPipeline(4, sink, nil)
 	app := fiber.New()
-	NewBound(config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: false}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, pipeline).Register(app)
+	NewBound(config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024, AuditEnabled: false}, registry, policy.NewResolver(nil), testAuthenticator{identity: auth.Identity{TenantID: "tenant-a", APIKeyID: "test-key", UpstreamID: testUpstreamURL}}, ratelimit.MemoryLimiter{}, audit.NoopAuditor{}, pipeline).Register(app)
 	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"prompt":"needle"}`)))
 	if err != nil {
 		t.Fatal(err)
@@ -662,7 +662,7 @@ func TestPublicAuthFailuresAreThrottled(t *testing.T) {
 	upstream := newTestUpstream(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer upstream.Close()
 	app := fiber.New()
-	testHandler(t, config.Config{MaxBodyBytes: 1024, MaxResponseBytes: 1024}, testAuthenticator{err: auth.ErrInvalidKey}).Register(app)
+	testHandler(t, config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1024, MaxResponseBytes: 1024}, testAuthenticator{err: auth.ErrInvalidKey}).Register(app)
 	var lastStatus int
 	for i := 0; i < 31; i++ {
 		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test"}`))

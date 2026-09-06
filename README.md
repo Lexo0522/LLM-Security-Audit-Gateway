@@ -24,6 +24,12 @@ The gateway audits the decoded plaintext of every request body. `Content-Encodin
 
 `AUDIT_ENABLED=false` turns the audit engine off entirely: the gateway proxies without rule scans, model audits, event persistence, or blocking. `AUDIT_FAIL_CLOSED=true` overrides any per-policy fail-open setting and blocks monitored requests while the synchronous auditor is unavailable.
 
+## SSRF protection for configured upstreams
+
+Every outbound upstream request — proxied traffic and the admin `test` probe alike — goes through the SSRF guard in `internal/proxy`: the gateway resolves the configured host itself and refuses to connect unless **every** resolved address passes the policy, so DNS rebinding cannot bounce a request into the internal network. Denied by default (in production always): loopback, RFC1918 and IPv6 ULA, link-local, multicast, and special-use ranges. Cloud metadata endpoints (`169.254.169.254`, Azure's platform address, AWS `fd00:ec2::254`) are refused in **every** mode, including development. Redirects may not change host or scheme and are capped at 3 hops, and each redirect hop is re-validated by the dialer. Rejection reasons are logged by category; internal addresses and credentials never appear in client-facing responses.
+
+Development stacks that run mock upstreams on internal addresses may set `UPSTREAM_ALLOW_PRIVATE_NETWORKS=true`; the gateway refuses to start with it in `GATEWAY_ENV=production`.
+
 ## ClickHouse audit queries
 
 `go run ./cmd/audit-consumer` consumes the Kafka audit topic into ClickHouse using the consumer group `audit-clickhouse-v1`. Set `CLICKHOUSE_DSN` (the Compose stack derives an authenticated DSN from `CLICKHOUSE_PASSWORD`); events are retained for 180 days and deduplicated by `event_id` at query time. Configure the same DSN on the gateway to enable the admin-only endpoints for paged event search, event detail, and hourly/daily summaries. Consumer failure never changes gateway request readiness.

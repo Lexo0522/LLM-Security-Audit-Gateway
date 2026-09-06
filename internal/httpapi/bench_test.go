@@ -63,7 +63,7 @@ func BenchmarkProxyJSON(b *testing.B) {
 		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello! how can I help you today?"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":12,"total_tokens":21}}`))
 	}))
 	defer upstream.Close()
-	app := benchApp(b, config.Config{MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, AuditEnabled: true})
+	app := benchApp(b, config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, AuditEnabled: true})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -77,7 +77,7 @@ func BenchmarkProxyJSONAuditDisabled(b *testing.B) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer upstream.Close()
-	app := benchApp(b, config.Config{MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, AuditEnabled: false})
+	app := benchApp(b, config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, AuditEnabled: false})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -98,7 +98,7 @@ func BenchmarkProxySSE(b *testing.B) {
 		flusher.Flush()
 	}))
 	defer upstream.Close()
-	app := benchApp(b, config.Config{MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, AuditEnabled: true})
+	app := benchApp(b, config.Config{UpstreamAllowPrivateNetworks: true, MaxBodyBytes: 1 << 20, MaxResponseBytes: 1 << 20, AuditEnabled: true})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

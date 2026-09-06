@@ -9,44 +9,45 @@ import (
 )
 
 type Config struct {
-	Environment               string
-	Version                   string
-	AllowDemoBootstrap        bool
-	ListenAddr                string
-	AdminAddr                 string
-	MaxBodyBytes              int
-	MaxResponseBytes          int
-	RequestTimeoutMS          int
-	AuditEnabled              bool
-	FailClosed                bool
-	PostgresURL               string
-	PostgresPoolMaxConns      int
-	PostgresConnMaxLifetimeMS int
-	PostgresConnMaxIdleMS     int
-	OutboxClaimSize           int
-	RedisURL                  string
-	KafkaBrokers              []string
-	KafkaAuditTopic           string
-	KafkaAuditDLQTopic        string
-	KafkaConsumerGroup        string
-	ClickHouseDSN             string
-	ConsumerListenAddr        string
-	EncryptionKeyFile         string
-	RateLimitRPS              int
-	RateLimitBurst            int
-	AuditorURL                string
-	AuditorModel              string
-	AuditorTimeoutMS          int
-	AuditorConcurrency        int
-	EventQueueSize            int
-	SSEAuditWindowBytes       int
-	SSEMaxEventBytes          int
-	HealthProbeIntervalMS     int
-	HealthProbeTimeoutMS      int
-	SnapshotRefreshIntervalMS int
-	AuditRecordsRetentionDays int
-	OutboxRetentionDays       int
-	RetentionSweepIntervalMS  int
+	Environment                  string
+	Version                      string
+	AllowDemoBootstrap           bool
+	UpstreamAllowPrivateNetworks bool
+	ListenAddr                   string
+	AdminAddr                    string
+	MaxBodyBytes                 int
+	MaxResponseBytes             int
+	RequestTimeoutMS             int
+	AuditEnabled                 bool
+	FailClosed                   bool
+	PostgresURL                  string
+	PostgresPoolMaxConns         int
+	PostgresConnMaxLifetimeMS    int
+	PostgresConnMaxIdleMS        int
+	OutboxClaimSize              int
+	RedisURL                     string
+	KafkaBrokers                 []string
+	KafkaAuditTopic              string
+	KafkaAuditDLQTopic           string
+	KafkaConsumerGroup           string
+	ClickHouseDSN                string
+	ConsumerListenAddr           string
+	EncryptionKeyFile            string
+	RateLimitRPS                 int
+	RateLimitBurst               int
+	AuditorURL                   string
+	AuditorModel                 string
+	AuditorTimeoutMS             int
+	AuditorConcurrency           int
+	EventQueueSize               int
+	SSEAuditWindowBytes          int
+	SSEMaxEventBytes             int
+	HealthProbeIntervalMS        int
+	HealthProbeTimeoutMS         int
+	SnapshotRefreshIntervalMS    int
+	AuditRecordsRetentionDays    int
+	OutboxRetentionDays          int
+	RetentionSweepIntervalMS     int
 }
 
 func Load() (Config, error) {
@@ -69,28 +70,29 @@ func Load() (Config, error) {
 		return value
 	}
 	cfg := Config{
-		Environment:               env("GATEWAY_ENV", "production"),
-		AllowDemoBootstrap:        boolOpt("ALLOW_DEMO_BOOTSTRAP_RULES", false),
-		ListenAddr:                env("GATEWAY_LISTEN_ADDR", ":8080"),
-		AdminAddr:                 env("GATEWAY_ADMIN_ADDR", ":8081"),
-		MaxBodyBytes:              intOpt("MAX_BODY_BYTES", 4<<20),
-		MaxResponseBytes:          intOpt("MAX_RESPONSE_BYTES", 16<<20),
-		RequestTimeoutMS:          intOpt("REQUEST_TIMEOUT_MS", 120000),
-		AuditEnabled:              boolOpt("AUDIT_ENABLED", true),
-		FailClosed:                boolOpt("AUDIT_FAIL_CLOSED", false),
-		PostgresURL:               os.Getenv("POSTGRES_URL"),
-		PostgresPoolMaxConns:      intOpt("PG_POOL_MAX_CONNS", 16),
-		PostgresConnMaxLifetimeMS: intOpt("PG_CONN_MAX_LIFETIME_MS", 1800000),
-		PostgresConnMaxIdleMS:     intOpt("PG_CONN_MAX_IDLE_MS", 300000),
-		OutboxClaimSize:           intOpt("OUTBOX_CLAIM_SIZE", 100),
-		RedisURL:                  os.Getenv("REDIS_URL"),
-		KafkaBrokers:              envList("KAFKA_BROKERS"),
-		KafkaAuditTopic:           env("KAFKA_AUDIT_TOPIC", "audit.events"),
-		KafkaAuditDLQTopic:        env("KAFKA_AUDIT_DLQ_TOPIC", ""),
-		KafkaConsumerGroup:        env("KAFKA_CONSUMER_GROUP", "audit-clickhouse-v1"),
-		ClickHouseDSN:             os.Getenv("CLICKHOUSE_DSN"),
-		ConsumerListenAddr:        env("AUDIT_CONSUMER_LISTEN_ADDR", ":9090"),
-		EncryptionKeyFile:         env("GATEWAY_ENCRYPTION_KEY_FILE", "/var/lib/gateway/keys/encryption.key"),
+		Environment:                  env("GATEWAY_ENV", "production"),
+		AllowDemoBootstrap:           boolOpt("ALLOW_DEMO_BOOTSTRAP_RULES", false),
+		UpstreamAllowPrivateNetworks: boolOpt("UPSTREAM_ALLOW_PRIVATE_NETWORKS", false),
+		ListenAddr:                   env("GATEWAY_LISTEN_ADDR", ":8080"),
+		AdminAddr:                    env("GATEWAY_ADMIN_ADDR", ":8081"),
+		MaxBodyBytes:                 intOpt("MAX_BODY_BYTES", 4<<20),
+		MaxResponseBytes:             intOpt("MAX_RESPONSE_BYTES", 16<<20),
+		RequestTimeoutMS:             intOpt("REQUEST_TIMEOUT_MS", 120000),
+		AuditEnabled:                 boolOpt("AUDIT_ENABLED", true),
+		FailClosed:                   boolOpt("AUDIT_FAIL_CLOSED", false),
+		PostgresURL:                  os.Getenv("POSTGRES_URL"),
+		PostgresPoolMaxConns:         intOpt("PG_POOL_MAX_CONNS", 16),
+		PostgresConnMaxLifetimeMS:    intOpt("PG_CONN_MAX_LIFETIME_MS", 1800000),
+		PostgresConnMaxIdleMS:        intOpt("PG_CONN_MAX_IDLE_MS", 300000),
+		OutboxClaimSize:              intOpt("OUTBOX_CLAIM_SIZE", 100),
+		RedisURL:                     os.Getenv("REDIS_URL"),
+		KafkaBrokers:                 envList("KAFKA_BROKERS"),
+		KafkaAuditTopic:              env("KAFKA_AUDIT_TOPIC", "audit.events"),
+		KafkaAuditDLQTopic:           env("KAFKA_AUDIT_DLQ_TOPIC", ""),
+		KafkaConsumerGroup:           env("KAFKA_CONSUMER_GROUP", "audit-clickhouse-v1"),
+		ClickHouseDSN:                os.Getenv("CLICKHOUSE_DSN"),
+		ConsumerListenAddr:           env("AUDIT_CONSUMER_LISTEN_ADDR", ":9090"),
+		EncryptionKeyFile:            env("GATEWAY_ENCRYPTION_KEY_FILE", "/var/lib/gateway/keys/encryption.key"),
 
 		RateLimitRPS:              intOpt("RATE_LIMIT_RPS", 60),
 		RateLimitBurst:            intOpt("RATE_LIMIT_BURST", 120),
@@ -123,6 +125,9 @@ func (c Config) Validate() error {
 	}
 	if c.AllowDemoBootstrap && c.Environment == "production" {
 		return fmt.Errorf("ALLOW_DEMO_BOOTSTRAP_RULES is not allowed in production")
+	}
+	if c.UpstreamAllowPrivateNetworks && c.Environment == "production" {
+		return fmt.Errorf("UPSTREAM_ALLOW_PRIVATE_NETWORKS is not allowed in production")
 	}
 	if c.PostgresURL == "" {
 		return fmt.Errorf("POSTGRES_URL is required for gateway identity and administration")
