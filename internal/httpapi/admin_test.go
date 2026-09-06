@@ -29,6 +29,7 @@ func (s auditReaderStub) GetEvent(context.Context, string) (audit.Event, error) 
 func (s auditReaderStub) Summary(context.Context, clickstore.EventFilter, string) (clickstore.Summary, error) {
 	return s.summary, nil
 }
+
 func TestAdminRequiresDatabaseSession(t *testing.T) {
 	app := fiber.New()
 	reader := auditReaderStub{page: clickstore.EventPage{Events: []audit.Event{{EventID: "event"}}}, summary: clickstore.Summary{TotalEvents: 1}}

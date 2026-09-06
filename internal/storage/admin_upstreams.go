@@ -175,24 +175,40 @@ func (r *Repository) GetUpstream(ctx context.Context, id string, key *internalcr
 	return value, nil
 }
 
-func (r *Repository) ListUpstreams(ctx context.Context) ([]Upstream, error) {
+func (r *Repository) ListUpstreams(ctx context.Context, limit, offset int) ([]Upstream, int64, error) {
 	if r == nil || r.pool == nil {
-		return nil, fmt.Errorf("postgres disabled")
+		return nil, 0, fmt.Errorf("postgres disabled")
 	}
-	rows, err := r.pool.Query(ctx, `SELECT id,name,base_url,enabled,(api_key_ciphertext IS NOT NULL),created_at,updated_at FROM upstream_configs ORDER BY name`)
+	if limit < 0 {
+		limit = 0
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var total int64
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM upstream_configs`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `SELECT id,name,base_url,enabled,(api_key_ciphertext IS NOT NULL),created_at,updated_at FROM upstream_configs ORDER BY name`
+	args := []any{}
+	if limit > 0 {
+		query += ` LIMIT $1 OFFSET $2`
+		args = append(args, limit, offset)
+	}
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	result := []Upstream{}
 	for rows.Next() {
 		var v Upstream
 		if err := rows.Scan(&v.ID, &v.Name, &v.BaseURL, &v.Enabled, &v.HasAPIKey, &v.CreatedAt, &v.UpdatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		result = append(result, v)
 	}
-	return result, rows.Err()
+	return result, total, rows.Err()
 }
 
 func (r *Repository) UpdateUpstream(ctx context.Context, id, name, baseURL, apiKey string, enabled bool, key *internalcrypto.Key) (Upstream, error) {

@@ -29,8 +29,8 @@ func (s *memoryStore) LookupGatewayAPIKey(_ context.Context, id string) (KeyReco
 	record, found := s.keys[id]
 	return record, found, nil
 }
-func (s *memoryStore) ListGatewayAPIKeys(_ context.Context, _ string) ([]KeyRecord, error) {
-	return nil, nil
+func (s *memoryStore) ListGatewayAPIKeys(_ context.Context, _ string, _, _ int) ([]KeyRecord, int64, error) {
+	return nil, 0, nil
 }
 func (s *memoryStore) RevokeGatewayAPIKey(_ context.Context, id string) (KeyRecord, bool, error) {
 	record, found := s.keys[id]

@@ -367,31 +367,44 @@ func (r *Repository) LookupGatewayAPIKey(ctx context.Context, id string) (auth.K
 	}
 	return record, err == nil, err
 }
-func (r *Repository) ListGatewayAPIKeys(ctx context.Context, tenantID string) ([]auth.KeyRecord, error) {
+func (r *Repository) ListGatewayAPIKeys(ctx context.Context, tenantID string, limit, offset int) ([]auth.KeyRecord, int64, error) {
 	if r == nil {
-		return nil, fmt.Errorf("postgres disabled")
+		return nil, 0, fmt.Errorf("postgres disabled")
 	}
-	query := `SELECT id,tenant_id,COALESCE(upstream_id::text,''),COALESCE(display_name,''),prefix,created_at,revoked_at FROM gateway_api_keys`
-	var rows pgx.Rows
-	var err error
-	if tenantID == "" {
-		rows, err = r.pool.Query(ctx, query+` ORDER BY created_at DESC`)
-	} else {
-		rows, err = r.pool.Query(ctx, query+` WHERE tenant_id=$1 ORDER BY created_at DESC`, tenantID)
+	if limit < 0 {
+		limit = 0
 	}
+	if offset < 0 {
+		offset = 0
+	}
+	filter, args := ``, []any{}
+	if tenantID != "" {
+		filter = ` WHERE tenant_id=$1`
+		args = append(args, tenantID)
+	}
+	var total int64
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM gateway_api_keys`+filter, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `SELECT id,tenant_id,COALESCE(upstream_id::text,''),COALESCE(display_name,''),prefix,created_at,revoked_at FROM gateway_api_keys` + filter + ` ORDER BY created_at DESC`
+	if limit > 0 {
+		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2)
+		args = append(args, limit, offset)
+	}
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	result := []auth.KeyRecord{}
 	for rows.Next() {
 		var record auth.KeyRecord
 		if err := rows.Scan(&record.ID, &record.TenantID, &record.UpstreamID, &record.DisplayName, &record.Prefix, &record.CreatedAt, &record.RevokedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		result = append(result, record)
 	}
-	return result, rows.Err()
+	return result, total, rows.Err()
 }
 func (r *Repository) RevokeGatewayAPIKey(ctx context.Context, id string) (auth.KeyRecord, bool, error) {
 	if r == nil {

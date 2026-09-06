@@ -51,7 +51,7 @@ type Authenticator interface {
 type KeyStore interface {
 	CreateGatewayAPIKey(context.Context, KeyRecord) (KeyRecord, error)
 	LookupGatewayAPIKey(context.Context, string) (KeyRecord, bool, error)
-	ListGatewayAPIKeys(context.Context, string) ([]KeyRecord, error)
+	ListGatewayAPIKeys(context.Context, string, int, int) ([]KeyRecord, int64, error)
 	RevokeGatewayAPIKey(context.Context, string) (KeyRecord, bool, error)
 }
 
@@ -116,11 +116,11 @@ func (m *Manager) Authenticate(ctx context.Context, authorization string) (Ident
 	return Identity{APIKeyID: record.ID, TenantID: record.TenantID, UpstreamID: record.UpstreamID}, nil
 }
 
-func (m *Manager) List(ctx context.Context, tenantID string) ([]KeyRecord, error) {
+func (m *Manager) List(ctx context.Context, tenantID string, limit, offset int) ([]KeyRecord, int64, error) {
 	if tenantID != "" && !ValidTenantID(tenantID) {
-		return nil, fmt.Errorf("invalid tenant_id")
+		return nil, 0, fmt.Errorf("invalid tenant_id")
 	}
-	return m.store.ListGatewayAPIKeys(ctx, tenantID)
+	return m.store.ListGatewayAPIKeys(ctx, tenantID, limit, offset)
 }
 func (m *Manager) Revoke(ctx context.Context, id string) (KeyRecord, bool, error) {
 	if _, err := uuid.Parse(id); err != nil {

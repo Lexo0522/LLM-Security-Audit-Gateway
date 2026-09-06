@@ -3,3 +3,13 @@
 @media(max-width:900px){.auth-layout{grid-template-columns:1fr}.auth-intro{min-height:330px;padding:28px 30px}.intro-copy{margin-top:20px}.intro-copy h1{font-size:48px}.auth-intro .signal{margin-top:30px}.auth-card{margin:38px auto 70px}.sidebar{width:76px;padding:25px 10px}.side-brand{padding:0 10px 40px}.side-brand>span:last-child,.side-label,.nav-item strong,.nav-item small,.system-chip span:last-child,.logout{display:none}.nav-item{justify-content:center;padding:14px 7px}.nav-item.active{padding-left:5px}.content{margin-left:76px;width:calc(100% - 76px)}.topbar,.page-body{padding-left:25px;padding-right:25px}.hero-panel{padding:30px}.hero-orbit{margin-right:-20px;opacity:.7}.split-layout{grid-template-columns:1fr}.sticky-panel{position:static}.secret-panel{grid-template-columns:1fr}.close-secret{grid-column:1;justify-self:start}}
 @media(max-width:600px){.topbar{padding-top:25px}.topbar h1{font-size:24px}.user-chip span:not(.avatar){display:none}.page-body{padding-top:28px}.hero-panel{min-height:340px;align-items:flex-start}.hero-orbit{position:absolute;right:-50px;bottom:-20px;opacity:.6}.hero-panel h2{font-size:37px}.stat-grid,.quick-grid{grid-template-columns:1fr}.section-heading{align-items:flex-start;gap:15px;flex-direction:column}.form-grid{grid-template-columns:1fr}.form-grid .wide,.form-grid .toggle{grid-column:auto}.data-card{align-items:flex-start;flex-wrap:wrap}.card-actions{width:100%;justify-content:flex-end;border-top:1px solid #203449;padding-top:10px}.filter-bar{flex-wrap:wrap}.filter-bar input,.filter-bar select{max-width:none;flex:1}.filter-bar .primary{margin-left:0}.auth-card{padding:35px 28px;width:calc(100% - 36px)}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* Toast + pagination + account panel */
+.toast { display: flex; align-items: center; gap: 12px; justify-content: space-between; border-radius: 12px; padding: 12px 16px; font-size: 14px; margin: 8px 0; }
+.toast.success { background: rgba(52, 199, 123, 0.14); color: #9ff0c0; border: 1px solid rgba(52, 199, 123, 0.35); }
+.toast.error { background: rgba(255, 99, 99, 0.14); color: #ffb3b3; border: 1px solid rgba(255, 99, 99, 0.35); }
+.toast button { background: none; border: none; color: inherit; font-size: 16px; cursor: pointer; }
+.pager { display: flex; align-items: center; justify-content: center; gap: 16px; margin: 18px 0 4px; }
+.pager span { font-size: 13px; opacity: 0.75; }
+.pager button:disabled { opacity: 0.4; cursor: not-allowed; }
+.account-panel { max-width: 460px; margin: 0 0 24px; display: flex; flex-direction: column; gap: 12px; }

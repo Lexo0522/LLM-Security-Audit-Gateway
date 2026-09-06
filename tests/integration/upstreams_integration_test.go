@@ -86,10 +86,10 @@ func TestUpstreamLifecycleWithRealPostgres(t *testing.T) {
 		t.Fatalf("stored=%+v err=%v", stored, err)
 	}
 
-	// Listing never carries secrets.
-	list, err := repo.ListUpstreams(ctx)
-	if err != nil {
-		t.Fatal(err)
+	// Listing never carries secrets, and the total reflects the full set.
+	list, total, err := repo.ListUpstreams(ctx, 0, 0)
+	if err != nil || total < 2 {
+		t.Fatalf("total=%d err=%v", total, err)
 	}
 	serialized, marshalErr := json.Marshal(list)
 	if marshalErr != nil || strings.Contains(string(serialized), "it-rotated-a-0002") || strings.Contains(string(serialized), "it-secret-a-0001") {

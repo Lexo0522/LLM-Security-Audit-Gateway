@@ -555,14 +555,36 @@ func (a *Admin) createKey(c *fiber.Ctx) error {
 	a.emitOperation(c, "api_key_create", "tenant:"+record.TenantID, "success", record.ID)
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": record.ID, "tenant_id": record.TenantID, "upstream_id": record.UpstreamID, "display_name": record.DisplayName, "prefix": record.Prefix, "created_at": record.CreatedAt, "key": key})
 }
+// pageParams parses ?limit/&offset for list endpoints. limit 0 means "all"
+// for internal callers; the API defaults to 50 and never exceeds 200 rows.
+func pageParams(c *fiber.Ctx) (int, int) {
+	limit, offset := 50, 0
+	if raw := c.Query("limit"); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value >= 0 {
+			limit = value
+		}
+	}
+	if raw := c.Query("offset"); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value >= 0 {
+			offset = value
+		}
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	return limit, offset
+}
+
 func (a *Admin) listKeys(c *fiber.Ctx) error {
 	if a.Keys == nil {
 		return fiber.ErrServiceUnavailable
 	}
-	keys, err := a.Keys.List(c.Context(), c.Query("tenant_id"))
+	limit, offset := pageParams(c)
+	keys, total, err := a.Keys.List(c.Context(), c.Query("tenant_id"), limit, offset)
 	if err != nil {
 		return a.fail("api_key_list", err)
 	}
+	c.Set("X-Total-Count", strconv.FormatInt(total, 10))
 	return c.JSON(keys)
 }
 func (a *Admin) revokeKey(c *fiber.Ctx) error {
@@ -622,10 +644,12 @@ func (a *Admin) listUpstreams(c *fiber.Ctx) error {
 	if a.Repo == nil {
 		return fiber.ErrServiceUnavailable
 	}
-	values, err := a.Repo.ListUpstreams(c.UserContext())
+	limit, offset := pageParams(c)
+	values, total, err := a.Repo.ListUpstreams(c.UserContext(), limit, offset)
 	if err != nil {
 		return a.fail("upstream_list", err)
 	}
+	c.Set("X-Total-Count", strconv.FormatInt(total, 10))
 	return c.JSON(values)
 }
 
