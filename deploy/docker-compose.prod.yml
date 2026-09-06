@@ -1,0 +1,40 @@
+# Production-shaped override for deploy/docker-compose.yml. Use together with
+# the base file:
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.prod.yml up -d
+#
+# Every ${VAR:?} fails the stack when the variable is unset, so the stack can
+# never come up on the development "change-me" defaults. Data services keep no
+# host port bindings; the admin listener stays unpublished and is reached only
+# through the web service's /admin/v1 proxy.
+services:
+  gateway:
+    environment:
+      GATEWAY_ENV: "production"
+      ALLOW_DEMO_BOOTSTRAP_RULES: "false"
+      ADMIN_COOKIE_SECURE_MODE: "auto"
+      ADMIN_TRUSTED_ORIGINS: "${ADMIN_TRUSTED_ORIGINS:?set ADMIN_TRUSTED_ORIGINS, e.g. https://admin.example.com}"
+      POSTGRES_URL: "postgres://audit:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/audit_gateway?sslmode=disable"
+      CLICKHOUSE_DSN: "http://audit:${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}@clickhouse:8123/default"
+      # UPSTREAM_ALLOW_PRIVATE_NETWORKS is intentionally absent: private
+      # upstream targets stay denied in production.
+
+  audit-consumer:
+    environment:
+      CLICKHOUSE_DSN: "http://audit:${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}@clickhouse:8123/default"
+
+  redis:
+    ports: !reset []
+
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+    ports: !reset []
+
+  clickhouse:
+    environment:
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}"
+    ports: !reset []
+
+  kafka:
+    ports: !reset []

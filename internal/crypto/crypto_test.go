@@ -56,3 +56,23 @@ func TestLoadOrCreateRejectsInvalidPersistedKey(t *testing.T) {
 		t.Fatal("invalid persisted key must be rejected")
 	}
 }
+
+func TestLoadOrCreateWithStatusReportsCreation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys", "encryption.key")
+	first, created, err := LoadOrCreateWithStatus(path)
+	if err != nil || !created {
+		t.Fatalf("first load created=%v err=%v", created, err)
+	}
+	second, created, err := LoadOrCreateWithStatus(path)
+	if err != nil || created {
+		t.Fatalf("second load created=%v err=%v", created, err)
+	}
+	ciphertext, err := first.Encrypt([]byte("same-unit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := second.Decrypt(ciphertext)
+	if err != nil || string(plaintext) != "same-unit" {
+		t.Fatalf("plaintext=%q err=%v", plaintext, err)
+	}
+}

@@ -154,8 +154,12 @@ func TestUpstreamLifecycleWithRealPostgres(t *testing.T) {
 func TestAdminSessionLifecycleWithRealPostgres(t *testing.T) {
 	ctx := context.Background()
 	repo, key := newStorageRepo(t)
+	manager, err := auth.NewManager(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
 	app := fiber.New()
-	admin := &httpapi.Admin{Repo: repo, EncryptionKey: key, CookieSecureMode: "never"}
+	admin := &httpapi.Admin{Repo: repo, EncryptionKey: key, Keys: manager, CookieSecureMode: "never"}
 	admin.Register(app)
 
 	var bodyOf func(*http.Response) string
@@ -250,12 +254,57 @@ func TestAdminSessionLifecycleWithRealPostgres(t *testing.T) {
 	if created.StatusCode != http.StatusCreated {
 		t.Fatalf("upstream create status=%d body=%s", created.StatusCode, bodyOf(created))
 	}
+	var createdUpstream struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(bodyOf(created)), &createdUpstream); err != nil || createdUpstream.ID == "" {
+		t.Fatalf("created=%s err=%v", bodyOf(created), err)
+	}
+	if hasSecrets, err := repo.HasUpstreamSecrets(ctx); err != nil || !hasSecrets {
+		t.Fatalf("hasSecrets=%v err=%v", hasSecrets, err)
+	}
 	// The same session with a hostile origin is rejected.
 	hostile := call(http.MethodPost, "/admin/v1/upstreams", upstreamPayload, sessionCookies, func(req *http.Request) {
 		req.Header.Set("Origin", "http://evil.test")
 	})
 	if hostile.StatusCode != http.StatusForbidden {
 		t.Fatalf("cross-origin write status=%d, want 403", hostile.StatusCode)
+	}
+
+	// Batch revocation is idempotent and reports unknown ids.
+	keyCreate := call(http.MethodPost, "/admin/v1/api-keys",
+		fmt.Sprintf(`{"tenant_id":"it-tenant-batch","upstream_id":%q,"display_name":"batch"}`, createdUpstream.ID),
+		sessionCookies, sameOrigin)
+	if keyCreate.StatusCode != http.StatusCreated {
+		t.Fatalf("key create status=%d body=%s", keyCreate.StatusCode, bodyOf(keyCreate))
+	}
+	var createdKey struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(bodyOf(keyCreate)), &createdKey); err != nil || createdKey.ID == "" {
+		t.Fatalf("key=%s err=%v", bodyOf(keyCreate), err)
+	}
+	batchBody := fmt.Sprintf(`{"ids":[%q,"00000000-0000-0000-0000-000000000000"]}`, createdKey.ID)
+	batch := call(http.MethodPost, "/admin/v1/api-keys/revoke", batchBody, sessionCookies, sameOrigin)
+	if batch.StatusCode != http.StatusOK {
+		t.Fatalf("batch revoke status=%d body=%s", batch.StatusCode, bodyOf(batch))
+	}
+	var batchResult struct {
+		Revoked int      `json:"revoked"`
+		Missing []string `json:"missing"`
+	}
+	if err := json.Unmarshal([]byte(bodyOf(batch)), &batchResult); err != nil {
+		t.Fatal(err)
+	}
+	if batchResult.Revoked != 1 || len(batchResult.Missing) != 1 {
+		t.Fatalf("batch result=%+v", batchResult)
+	}
+	retry := call(http.MethodPost, "/admin/v1/api-keys/revoke", batchBody, sessionCookies, sameOrigin)
+	var retryResult struct {
+		Revoked int `json:"revoked"`
+	}
+	if err := json.Unmarshal([]byte(bodyOf(retry)), &retryResult); err != nil || retryResult.Revoked != 1 {
+		t.Fatalf("retry must return a stable count, result=%s err=%v", bodyOf(retry), err)
 	}
 
 	// A second login coexists until the password rotation revokes it.

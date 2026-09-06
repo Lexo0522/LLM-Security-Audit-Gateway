@@ -49,7 +49,8 @@ try {
     throw 'Smoke stack did not become ready within six minutes.'
   }
 
-  go test -tags=smoke ./tests/smoke
+  # -count=1 keeps the acceptance run honest: a cached pass proves nothing.
+  go test -tags=smoke -count=1 ./tests/smoke
   if ($LASTEXITCODE -ne 0) { throw 'Smoke tests failed.' }
 } finally {
   if ($started) { docker compose -p $project @composeArgs down --volumes --remove-orphans }

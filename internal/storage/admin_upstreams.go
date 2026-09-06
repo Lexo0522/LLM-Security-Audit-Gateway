@@ -271,6 +271,18 @@ func encryptSecret(secret string, key *internalcrypto.Key) ([]byte, error) {
 	}
 	return key.Encrypt([]byte(secret))
 }
+// HasUpstreamSecrets reports whether any upstream stores an encrypted API
+// key. Startup uses it to refuse a freshly generated encryption key that
+// would orphan existing ciphertexts.
+func (r *Repository) HasUpstreamSecrets(ctx context.Context) (bool, error) {
+	if r == nil || r.pool == nil {
+		return false, fmt.Errorf("postgres disabled")
+	}
+	var count int64
+	err := r.pool.QueryRow(ctx, `SELECT count(*) FROM upstream_configs WHERE api_key_ciphertext IS NOT NULL`).Scan(&count)
+	return count > 0, err
+}
+
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"

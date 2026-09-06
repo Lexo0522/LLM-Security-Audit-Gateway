@@ -4,7 +4,9 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -91,10 +93,32 @@ func main() {
 			defer auditStore.Close()
 		}
 	}
-	encryptionKey, err := internalcrypto.LoadOrCreate(cfg.EncryptionKeyFile)
+	encryptionKey, encryptionKeyCreated, err := internalcrypto.LoadOrCreateWithStatus(cfg.EncryptionKeyFile)
 	if err != nil {
 		logger.Error("load encryption key", slog.Any("error", err))
 		return
+	}
+	if encryptionKeyCreated {
+		allowGenerate := false
+		if raw := os.Getenv("GATEWAY_ENCRYPTION_KEY_ALLOW_GENERATE"); raw != "" {
+			allowGenerate, _ = strconv.ParseBool(raw)
+		}
+		if cfg.Environment == "production" && !allowGenerate {
+			logger.Error("a new gateway encryption key was generated; production refuses implicit key generation — restore the key file into GATEWAY_ENCRYPTION_KEY_FILE or set GATEWAY_ENCRYPTION_KEY_ALLOW_GENERATE=true if no secrets exist yet")
+			return
+		}
+		// The key file and PostgreSQL are one recovery unit: a fresh key
+		// paired with existing ciphertexts means those secrets are already
+		// lost. Fail loudly instead of serving 502s with no explanation.
+		orphaned, secretsErr := repo.HasUpstreamSecrets(ctx)
+		if secretsErr != nil {
+			logger.Error("check for existing upstream secrets", slog.Any("error", secretsErr))
+			return
+		}
+		if orphaned {
+			logger.Error("the gateway encryption key file was missing and has been regenerated; stored upstream API keys can no longer be decrypted. Restore the original key file (the gateway-keys volume and PostgreSQL are one recovery unit), or delete the affected upstreams and re-enter their keys")
+			return
+		}
 	}
 	keys, err := auth.NewManager(repo)
 	if err != nil {

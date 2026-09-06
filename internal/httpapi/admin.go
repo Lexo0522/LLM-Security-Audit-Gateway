@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -122,6 +123,7 @@ func (a *Admin) Register(app *fiber.App) {
 	app.Put("/admin/v1/upstreams/:id", a.updateUpstream)
 	app.Delete("/admin/v1/upstreams/:id", a.deleteUpstream)
 	app.Post("/admin/v1/upstreams/:id/test", a.testUpstream)
+	app.Post("/admin/v1/api-keys/revoke", a.revokeKeysBatch)
 	app.Post("/admin/v1/api-keys/:id/revoke", a.revokeKey)
 	app.Post("/admin/v1/policies", a.createPolicy)
 	app.Get("/admin/v1/policies", a.listPolicies)
@@ -577,6 +579,45 @@ func (a *Admin) revokeKey(c *fiber.Ctx) error {
 	a.emitOperation(c, "api_key_revoke", "tenant:"+record.TenantID, "success", record.ID)
 	return c.JSON(record)
 }
+
+// revokeKeysBatch revokes many gateway keys in one call. "revoked" counts ids
+// that exist and are revoked after the call — already-revoked ids stay counted
+// on a retried batch, so repeating the request returns the same result.
+// Unknown ids are reported as missing instead of failing.
+func (a *Admin) revokeKeysBatch(c *fiber.Ctx) error {
+	if a.Keys == nil {
+		return fiber.ErrServiceUnavailable
+	}
+	var input struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.BodyParser(&input); err != nil || len(input.IDs) == 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "ids is required")
+	}
+	if len(input.IDs) > 500 {
+		return fiber.NewError(fiber.StatusBadRequest, "at most 500 ids per batch")
+	}
+	revoked := 0
+	missing := []string{}
+	for _, id := range input.IDs {
+		record, found, err := a.Keys.Revoke(c.Context(), id)
+		if err != nil {
+			return a.fail("api_key_revoke_batch", err)
+		}
+		if found {
+			revoked++
+			// The per-key audit event fires only for fresh revocations so a
+			// retried batch does not duplicate them.
+			if record.RevokedAt != nil && time.Since(*record.RevokedAt) < time.Minute {
+				a.emitOperation(c, "api_key_revoke", "tenant:"+record.TenantID, "success", record.ID, map[string]string{"batch": "true"})
+			}
+		} else {
+			missing = append(missing, id)
+		}
+	}
+	a.emitOperation(c, "api_key_revoke_batch", "", "success", strconv.Itoa(revoked))
+	return c.JSON(fiber.Map{"revoked": revoked, "missing": missing})
+}
 func (a *Admin) listUpstreams(c *fiber.Ctx) error {
 	if a.Repo == nil {
 		return fiber.ErrServiceUnavailable
@@ -636,7 +677,7 @@ func (a *Admin) updateUpstream(c *fiber.Ctx) error {
 	if err != nil {
 		return a.fail("upstream_update", err)
 	}
-	a.emitOperation(c, "upstream_update", "", "success", value.ID)
+	a.emitOperation(c, "upstream_update", "", "success", value.ID, map[string]string{"key_rotated": strconv.FormatBool(input.APIKey != "")})
 	return c.JSON(value)
 }
 
@@ -745,7 +786,7 @@ func (a *Admin) refreshPolicies(ctx context.Context) {
 		a.PolicyChanged(ctx)
 	}
 }
-func (a *Admin) emitOperation(c *fiber.Ctx, operation, scope, outcome, version string) {
+func (a *Admin) emitOperation(c *fiber.Ctx, operation, scope, outcome, version string, detail ...map[string]string) {
 	if a.Events == nil {
 		return
 	}
@@ -757,5 +798,11 @@ func (a *Admin) emitOperation(c *fiber.Ctx, operation, scope, outcome, version s
 	if requestID == "" {
 		requestID = uuid.NewString()
 	}
-	a.Events.Enqueue(audit.Event{SchemaVersion: "2", EventID: uuid.NewString(), EventTime: time.Now().UTC(), RequestID: requestID, TenantID: "admin", Direction: audit.DirectionAdmin, Path: c.Path(), Decision: outcome, RuleVersion: version, Metadata: map[string]string{"operation": operation, "scope": scope, "actor": actor, "outcome": outcome}})
+	metadata := map[string]string{"operation": operation, "scope": scope, "actor": actor, "outcome": outcome}
+	if len(detail) > 0 {
+		for key, value := range detail[0] {
+			metadata[key] = value
+		}
+	}
+	a.Events.Enqueue(audit.Event{SchemaVersion: "2", EventID: uuid.NewString(), EventTime: time.Now().UTC(), RequestID: requestID, TenantID: "admin", Direction: audit.DirectionAdmin, Path: c.Path(), Decision: outcome, RuleVersion: version, Metadata: metadata})
 }

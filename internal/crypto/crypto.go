@@ -72,50 +72,61 @@ func (k *Key) Decrypt(ciphertext []byte) ([]byte, error) {
 // LoadOrCreate reads a 32-byte service key, creating it with mode 0600 when it
 // does not exist. Creation uses an exclusive file and a private parent dir.
 func LoadOrCreate(path string) (*Key, error) {
+	key, _, err := LoadOrCreateWithStatus(path)
+	return key, err
+}
+
+// LoadOrCreateWithStatus additionally reports whether the key file had to be
+// created. Callers use that to refuse booting a database full of ciphertexts
+// with a freshly generated key: the stored secrets would be unreadable.
+func LoadOrCreateWithStatus(path string) (key *Key, created bool, err error) {
 	if path == "" {
-		return nil, fmt.Errorf("key path is required")
+		return nil, false, fmt.Errorf("key path is required")
 	}
 	data, err := os.ReadFile(path) // #nosec G304 -- path comes from trusted operator configuration, not user or request input
 	if err == nil {
 		if chmodErr := os.Chmod(path, 0600); chmodErr != nil {
-			return nil, fmt.Errorf("restrict encryption key permissions: %w", chmodErr)
+			return nil, false, fmt.Errorf("restrict encryption key permissions: %w", chmodErr)
 		}
-		return New(data)
+		parsed, parseErr := New(data)
+		return parsed, false, parseErr
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("read encryption key: %w", err)
+		return nil, false, fmt.Errorf("read encryption key: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return nil, fmt.Errorf("create encryption key directory: %w", err)
+		return nil, false, fmt.Errorf("create encryption key directory: %w", err)
 	}
 	if err := os.Chmod(filepath.Dir(path), 0700); err != nil { // #nosec G302 -- the key directory must remain private and executable by its owner
-		return nil, fmt.Errorf("restrict encryption key directory permissions: %w", err)
+		return nil, false, fmt.Errorf("restrict encryption key directory permissions: %w", err)
 	}
 	raw := make([]byte, KeySize)
 	if _, err := io.ReadFull(rand.Reader, raw); err != nil {
-		return nil, fmt.Errorf("generate encryption key: %w", err)
+		return nil, false, fmt.Errorf("generate encryption key: %w", err)
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- path comes from trusted operator configuration, not user or request input
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			data, readErr := os.ReadFile(path) // #nosec G304 -- path comes from trusted operator configuration, not user or request input
 			if readErr != nil {
-				return nil, fmt.Errorf("read concurrently-created encryption key: %w", readErr)
+				return nil, false, fmt.Errorf("read concurrently-created encryption key: %w", readErr)
 			}
-			return New(data)
+			parsed, parseErr := New(data)
+			return parsed, false, parseErr
 		}
-		return nil, fmt.Errorf("create encryption key: %w", err)
+		return nil, false, fmt.Errorf("create encryption key: %w", err)
 	}
 	_, writeErr := file.Write(raw)
 	closeErr := file.Close()
 	if writeErr != nil || closeErr != nil {
 		_ = os.Remove(path)
 		if writeErr != nil {
-			return nil, fmt.Errorf("write encryption key: %w", writeErr)
+			return nil, false, fmt.Errorf("write encryption key: %w", writeErr)
 		}
-		return nil, fmt.Errorf("close encryption key: %w", closeErr)
+		return nil, false, fmt.Errorf("close encryption key: %w", closeErr)
 	}
-	return New(raw)
+	parsed, parseErr := New(raw)
+	return parsed, true, parseErr
 }
 
 // EncodeKey is useful for configuration/bootstrap tooling, but does not expose

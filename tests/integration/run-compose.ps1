@@ -45,7 +45,7 @@ try {
     docker compose -p $project -f $compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic $topic --partitions 1 --replication-factor 1
     if ($LASTEXITCODE -ne 0) { throw "Failed to create integration topic $topic." }
   }
-  go test -tags=integration ./tests/integration
+  go test -tags=integration -count=1 ./tests/integration
   if ($LASTEXITCODE -ne 0) { throw 'Integration tests failed.' }
 } finally {
   if ($started) { docker compose -p $project -f $compose down --volumes --remove-orphans }
