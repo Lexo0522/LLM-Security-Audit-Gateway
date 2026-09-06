@@ -4,11 +4,15 @@
 // management surface through http://localhost:3000 (the SPA nginx proxying to
 // the admin listener) and proxy traffic through http://localhost:8080.
 // tests/smoke/run-smoke.ps1 builds the images, boots a dedicated compose
-// project with fresh volumes, runs this test, and tears everything down.
+// project with fresh volumes, runs phase 1, restarts the gateway container,
+// runs phase 2, and tears everything down. Phase 2 receives phase 1's state
+// through a JSON file (SMOKE_STATE_FILE) so no orchestration lives in Go.
 package smoke
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,24 +20,35 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-const (
+// Test fixtures are generated per run: nothing here is a real credential,
+// and the stack is torn down (volumes included) when the smoke run ends.
+var (
 	adminUsername = "smoke-admin"
-	adminPassword = "smoke-admin-password-1"
+	adminPassword = "smoke-" + randomToken(12)
 	// No "sk-" prefix: the demo bootstrap rules block responses matching
 	// sk-[a-z0-9], and the mock upstreams echo the Authorization header back.
-	upstreamKeyA      = "upstream-a-key-1234567890"
-	upstreamKeyB      = "upstream-b-key-0987654321"
-	upstreamABaseURL  = "http://upstream-a"
-	upstreamBBaseURL  = "http://upstream-b"
+	upstreamKeyA     = "upstream-a-key-" + randomToken(10)
+	upstreamKeyB     = "upstream-b-key-" + randomToken(10)
+	upstreamABaseURL = "http://upstream-a"
+	upstreamBBaseURL = "http://upstream-b"
+
 	sessionCookieName = "gateway_admin_session"
 )
+
+// randomToken returns n random bytes as lowercase hex.
+func randomToken(n int) string {
+	raw := make([]byte, n)
+	if _, err := rand.Read(raw); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(raw)
+}
 
 var (
 	webBase     = envDefault("SMOKE_WEB_URL", "http://localhost:3000")
@@ -204,6 +219,51 @@ type auditPage struct {
 	NextCursor string            `json:"next_cursor,omitempty"`
 }
 
+// smokeState carries phase 1's generated credentials and identifiers into
+// phase 2, which runs as a separate process after the runner restarts the
+// gateway container.
+type smokeState struct {
+	Username      string `json:"username"`
+	Password      string `json:"password"`
+	UpstreamKeyA  string `json:"upstream_key_a"`
+	UpstreamKeyB  string `json:"upstream_key_b"`
+	GatewayKeyA   string `json:"gateway_key_a"`
+	GatewayKeyB   string `json:"gateway_key_b"`
+	UpstreamAID   string `json:"upstream_a_id"`
+	GatewayKeyBID string `json:"gateway_key_b_id"`
+}
+
+func statePath() string {
+	if value := strings.TrimSpace(os.Getenv("SMOKE_STATE_FILE")); value != "" {
+		return value
+	}
+	return filepath.Join(os.TempDir(), "smoke-state.json")
+}
+
+func writeState(t *testing.T, state smokeState) {
+	t.Helper()
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath(), raw, 0o600); err != nil {
+		t.Fatalf("write smoke state: %v", err)
+	}
+}
+
+func readState(t *testing.T) smokeState {
+	t.Helper()
+	raw, err := os.ReadFile(statePath())
+	if err != nil {
+		t.Fatalf("read smoke state (run phase 1 first): %v", err)
+	}
+	var state smokeState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("decode smoke state: %v", err)
+	}
+	return state
+}
+
 // secretSet maps a human label to secret material so leak failures can name
 // what leaked without ever printing the secret itself.
 type secretSet map[string]string
@@ -268,39 +328,18 @@ func waitFor(t *testing.T, timeout time.Duration, what string, check func() bool
 	}
 }
 
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	if root := strings.TrimSpace(os.Getenv("SMOKE_REPO_ROOT")); root != "" {
-		return root
-	}
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("working directory: %v", err)
-	}
-	root, err := filepath.Abs(filepath.Join(wd, "..", ".."))
-	if err != nil {
-		t.Fatalf("repo root: %v", err)
-	}
-	return root
+// loginPayload builds a login request body without ever embedding a password
+// literal in source.
+func loginPayload(username, password string) []byte {
+	return []byte(fmt.Sprintf(`{"username":%q,"password":%q}`, username, password))
 }
 
-func restartGateway(t *testing.T, project string) {
-	t.Helper()
-	cmd := exec.Command("docker", "compose", "-p", project,
-		"-f", "deploy/docker-compose.yml", "-f", "deploy/docker-compose.smoke.yml",
-		"restart", "gateway")
-	cmd.Dir = repoRoot(t)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("restart gateway container: %v\n%s", err, out)
-	}
-}
-
-// TestComposeSmoke walks the acceptance path for the whole stack: first-run
-// admin setup, upstream and key provisioning, per-key routing isolation,
-// disable/revoke enforcement, secret decryption across a gateway restart, and
-// the absence of secret material on every management surface.
-func TestComposeSmoke(t *testing.T) {
+// TestComposeSmokePhase1 walks the acceptance path from a fresh stack: SPA,
+// first-run admin setup, login, upstream and key provisioning, per-key
+// routing isolation, disable/revoke enforcement, and the CSRF guard. It
+// writes its state for phase 2, which the runner runs after restarting the
+// gateway container.
+func TestComposeSmokePhase1(t *testing.T) {
 	c := newStackClient(t)
 	origin := webBase
 
@@ -336,20 +375,18 @@ func TestComposeSmoke(t *testing.T) {
 		status, body = c.adminCall(http.MethodPost, "/admin/v1/setup", []byte(`{}`), "http://evil.example")
 		wantStatus(t, status, http.StatusForbidden, "cross-origin setup", body)
 
-		payload := fmt.Sprintf(`{"username":%q,"password":%q}`, adminUsername, adminPassword)
-		status, body = c.adminCall(http.MethodPost, "/admin/v1/setup", []byte(payload), origin)
+		status, body = c.adminCall(http.MethodPost, "/admin/v1/setup", loginPayload(adminUsername, adminPassword), origin)
 		wantStatus(t, status, http.StatusCreated, "setup", body)
 		assertNoSecrets(t, "setup response", body, secrets)
 	})
 
 	t.Run("login and session", func(t *testing.T) {
-		badPayload := fmt.Sprintf(`{"username":%q,"password":"definitely-wrong-1"}`, adminUsername)
-		status, body := c.adminCall(http.MethodPost, "/admin/v1/auth/login", []byte(badPayload), origin)
+		wrongPassword := "definitely-wrong-" + randomToken(6)
+		status, body := c.adminCall(http.MethodPost, "/admin/v1/auth/login", loginPayload(adminUsername, wrongPassword), origin)
 		wantStatus(t, status, http.StatusUnauthorized, "login with wrong password", body)
 		assertNoSecrets(t, "failed login response", body, secrets)
 
-		payload := fmt.Sprintf(`{"username":%q,"password":%q}`, adminUsername, adminPassword)
-		status, body = c.adminCall(http.MethodPost, "/admin/v1/auth/login", []byte(payload), origin)
+		status, body = c.adminCall(http.MethodPost, "/admin/v1/auth/login", loginPayload(adminUsername, adminPassword), origin)
 		wantStatus(t, status, http.StatusOK, "login", body)
 		var user adminUser
 		decodeInto(t, body, &user)
@@ -461,7 +498,7 @@ func TestComposeSmoke(t *testing.T) {
 
 	t.Run("disabling an upstream cuts off its keys", func(t *testing.T) {
 		// Always restore upstream-a so a mid-subtest failure does not leave it
-		// disabled for the restart step below.
+		// disabled for the phases below.
 		t.Cleanup(func() {
 			payload := fmt.Sprintf(`{"name":%q,"base_url":%q,"enabled":true}`, upstreamA.Name, upstreamA.BaseURL)
 			req, err := http.NewRequest(http.MethodPut, webBase+"/admin/v1/upstreams/"+upstreamA.ID, strings.NewReader(payload))
@@ -508,27 +545,62 @@ func TestComposeSmoke(t *testing.T) {
 		assertNoSecrets(t, "revoked key error body", raw, secrets)
 	})
 
-	t.Run("gateway restart keeps decryption and revocations", func(t *testing.T) {
-		project := strings.TrimSpace(os.Getenv("SMOKE_COMPOSE_PROJECT"))
-		if project == "" {
-			t.Log("SMOKE_COMPOSE_PROJECT is not set; skipping the container restart step")
-			return
-		}
-		restartGateway(t, project)
+	writeState(t, smokeState{
+		Username:      adminUsername,
+		Password:      adminPassword,
+		UpstreamKeyA:  upstreamKeyA,
+		UpstreamKeyB:  upstreamKeyB,
+		GatewayKeyA:   keyA.Key,
+		GatewayKeyB:   keyB.Key,
+		UpstreamAID:   upstreamA.ID,
+		GatewayKeyBID: keyB.ID,
+	})
+}
+
+// TestComposeSmokePhase2 runs after the runner restarted the gateway
+// container: the persisted upstream keys must still decrypt, the revocation
+// must hold, and no management surface or audit event may carry secrets.
+func TestComposeSmokePhase2(t *testing.T) {
+	state := readState(t)
+	secrets := secretSet{
+		"admin password":     state.Password,
+		"upstream a api key": state.UpstreamKeyA,
+		"upstream b api key": state.UpstreamKeyB,
+		"gateway key a":      state.GatewayKeyA,
+		"gateway key b":      state.GatewayKeyB,
+	}
+	c := newStackClient(t)
+
+	t.Run("gateway is back after the restart", func(t *testing.T) {
 		waitFor(t, 2*time.Minute, "gateway /healthz after restart", func() bool {
 			return c.statusOf(gatewayBase+"/healthz") == http.StatusOK
 		})
+	})
 
-		// The stored upstream API key must still decrypt after a cold process.
-		status, raw := c.proxyCall(keyA.Key, chatBody("after gateway restart"))
+	t.Run("stored upstream keys still decrypt after the restart", func(t *testing.T) {
+		status, raw := c.proxyCall(state.GatewayKeyA, chatBody("after gateway restart"))
 		wantStatus(t, status, http.StatusOK, "proxy with key a after restart", raw)
-		if !strings.Contains(raw, `"upstream":"a"`) || !strings.Contains(raw, `"auth":"Bearer `+upstreamKeyA+`"`) {
+		if !strings.Contains(raw, `"upstream":"a"`) || !strings.Contains(raw, `"auth":"Bearer `+state.UpstreamKeyA+`"`) {
 			t.Fatalf("after restart key a did not reach upstream a with the stored api key; body: %.500s", raw)
 		}
+	})
 
-		// Revocation is durable too.
-		status, raw = c.proxyCall(keyB.Key, chatBody("after gateway restart"))
+	t.Run("revocations survive the restart", func(t *testing.T) {
+		status, raw := c.proxyCall(state.GatewayKeyB, chatBody("after gateway restart"))
 		wantStatus(t, status, http.StatusUnauthorized, "proxy with revoked key b after restart", raw)
+		wantCode(t, raw, "invalid_api_key", "revoked key error")
+		assertNoSecrets(t, "revoked key error body", raw, secrets)
+	})
+
+	t.Run("fresh admin session works after the restart", func(t *testing.T) {
+		status, body := c.adminCall(http.MethodPost, "/admin/v1/auth/login", loginPayload(state.Username, state.Password), webBase)
+		wantStatus(t, status, http.StatusOK, "login after restart", body)
+		var user adminUser
+		decodeInto(t, body, &user)
+		if user.Username != state.Username {
+			t.Fatalf("login returned user %q", user.Username)
+		}
+		secrets["admin session token"] = c.sessionCookie(t)
 	})
 
 	t.Run("management surfaces and audit trail never contain secrets", func(t *testing.T) {

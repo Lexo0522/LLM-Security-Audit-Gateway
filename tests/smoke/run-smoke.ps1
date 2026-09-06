@@ -10,8 +10,9 @@ $project = 'audit-gateway-smoke'
 $composeArgs = @('-f', 'deploy/docker-compose.yml', '-f', 'deploy/docker-compose.smoke.yml')
 $env:POSTGRES_PASSWORD = 'audit-smoke-password'
 $env:CLICKHOUSE_PASSWORD = 'audit-smoke-password'
-# The smoke test restarts the gateway container mid-run.
-$env:SMOKE_COMPOSE_PROJECT = $project
+# Phase 2 needs the state phase 1 generated; the restart between the phases
+# is orchestrated here so the Go test code contains no docker commands.
+$env:SMOKE_STATE_FILE = Join-Path ([System.IO.Path]::GetTempPath()) ("smoke-state-" + [guid]::NewGuid().ToString() + ".json")
 $env:SMOKE_REPO_ROOT = $root
 
 docker version | Out-Null
@@ -50,8 +51,17 @@ try {
   }
 
   # -count=1 keeps the acceptance run honest: a cached pass proves nothing.
-  go test -tags=smoke -count=1 ./tests/smoke
-  if ($LASTEXITCODE -ne 0) { throw 'Smoke tests failed.' }
+  $env:SMOKE_PHASE = '1'
+  go test -tags=smoke -count=1 -run TestComposeSmokePhase1 ./tests/smoke
+  if ($LASTEXITCODE -ne 0) { throw 'Smoke phase 1 failed.' }
+
+  docker compose -p $project @composeArgs restart gateway
+  if ($LASTEXITCODE -ne 0) { throw 'Failed to restart the gateway container.' }
+
+  $env:SMOKE_PHASE = '2'
+  go test -tags=smoke -count=1 -run TestComposeSmokePhase2 ./tests/smoke
+  if ($LASTEXITCODE -ne 0) { throw 'Smoke phase 2 failed.' }
 } finally {
   if ($started) { docker compose -p $project @composeArgs down --volumes --remove-orphans }
+  if ($env:SMOKE_STATE_FILE -and (Test-Path $env:SMOKE_STATE_FILE)) { Remove-Item $env:SMOKE_STATE_FILE -Force }
 }

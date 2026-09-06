@@ -51,7 +51,7 @@ func (p *TargetPolicy) ValidateTarget(ctx context.Context, rawURL string) error 
 	if reason == "" {
 		return nil
 	}
-	p.deny(hostOf(rawURL), reason)
+	p.logDenial(hostOf(rawURL), reason)
 	return fmt.Errorf("%w: %s", ErrUpstreamTargetDenied, reason)
 }
 
@@ -107,12 +107,16 @@ func (p *TargetPolicy) denyReason(ip net.IP) string {
 }
 
 func (p *TargetPolicy) deny(host, reason string) error {
+	p.logDenial(host, reason)
+	return fmt.Errorf("%w: %s", ErrUpstreamTargetDenied, reason)
+}
+
+func (p *TargetPolicy) logDenial(host, reason string) {
 	if p.log != nil {
 		// Host and category only: never the resolved internal address, the
 		// request path, or any credential.
 		p.log.Warn("upstream target denied by SSRF guard", slog.String("host", host), slog.String("reason", reason))
 	}
-	return fmt.Errorf("%w: %s", ErrUpstreamTargetDenied, reason)
 }
 
 // redirectPolicy refuses redirects that move the request to another host or

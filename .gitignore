@@ -6,3 +6,6 @@ CLAUDE.md
 !deploy/.env.example
 /web/node_modules/
 /web/dist/
+
+# Mimosa security hook state (local tool internals)
+/.mimosa/
