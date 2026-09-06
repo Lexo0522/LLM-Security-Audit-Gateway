@@ -65,3 +65,16 @@ jobs:
           go-version-file: go.mod
       - name: run-compose integration tests
         run: pwsh ./tests/integration/run-compose.ps1
+
+  # Builds the gateway/web images and walks the full admin/proxy acceptance
+  # path (fresh volumes, setup, dual-key routing, disable/revoke, restart
+  # decryption, leak scan) against the composed stack.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: full-stack compose smoke test
+        run: pwsh ./tests/smoke/run-smoke.ps1

@@ -9,7 +9,7 @@ services:
       - "3000:80"
     depends_on:
       gateway:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   gateway:

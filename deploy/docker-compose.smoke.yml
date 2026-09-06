@@ -1,0 +1,33 @@
+# Full-stack smoke environment. Run together with the base compose file under
+# the dedicated project name set by tests/smoke/run-smoke.ps1; the project name
+# gives the smoke stack its own PostgreSQL/keys volumes, so it never touches a
+# developer stack.
+services:
+  gateway:
+    environment:
+      # The mock upstreams resolve to compose-internal addresses. This switch
+      # is only meaningful in development stacks; production must never set it
+      # (the gateway refuses it in GATEWAY_ENV=production).
+      UPSTREAM_ALLOW_PRIVATE_NETWORKS: "true"
+
+  upstream-a:
+    image: nginx:alpine
+    volumes:
+      - ./smoke/upstream-a.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  upstream-b:
+    image: nginx:alpine
+    volumes:
+      - ./smoke/upstream-b.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped

@@ -9,8 +9,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -X main.version=${VERSION}' -o /out/gateway ./cmd/gateway
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -X main.version=${VERSION}' -o /out/audit-consumer ./cmd/audit-consumer
+RUN VERSION=${VERSION}; CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/gateway ./cmd/gateway
+RUN VERSION=${VERSION}; CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/audit-consumer ./cmd/audit-consumer
 
 FROM alpine:3.21
 # ca-certificates: upstream, auditor, and ClickHouse may use HTTPS.
