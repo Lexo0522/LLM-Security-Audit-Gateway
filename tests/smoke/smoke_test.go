@@ -397,6 +397,15 @@ func TestComposeSmoke(t *testing.T) {
 		}
 	})
 
+	t.Run("ssrf guard refuses metadata targets", func(t *testing.T) {
+		// 169.254.169.254 is refused in every mode, including this stack's
+		// development mode that otherwise permits private networks.
+		payload := `{"name":"metadata-target","base_url":"http://169.254.169.254/latest/meta-data/","api_key":"irrelevant"}`
+		status, body := c.adminCall(http.MethodPost, "/admin/v1/upstreams", []byte(payload), origin)
+		wantStatus(t, status, http.StatusBadRequest, "create metadata upstream", body)
+		assertNoSecrets(t, "metadata rejection body", body, secrets)
+	})
+
 	t.Run("create gateway keys", func(t *testing.T) {
 		for _, tc := range []struct {
 			tenant, displayName string
