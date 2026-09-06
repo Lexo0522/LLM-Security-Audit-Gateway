@@ -72,6 +72,12 @@ func (a *Admin) fail(operation string, err error) error {
 	if errors.As(err, &validation) {
 		return fiber.NewError(fiber.StatusBadRequest, validation.Error())
 	}
+	if errors.Is(err, storage.ErrDuplicateUpstreamName) || errors.Is(err, storage.ErrDuplicateAdminUsername) {
+		return fiber.NewError(fiber.StatusConflict, "name already exists")
+	}
+	if errors.Is(err, storage.ErrUpstreamInUse) {
+		return fiber.NewError(fiber.StatusConflict, "upstream has bound gateway keys")
+	}
 	if storage.IsNotFound(err) {
 		return fiber.ErrNotFound
 	}

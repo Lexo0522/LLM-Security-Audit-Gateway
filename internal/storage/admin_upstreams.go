@@ -17,6 +17,7 @@ var (
 	ErrDuplicateUpstreamName  = errors.New("upstream name already exists")
 	ErrInvalidUpstreamURL     = errors.New("invalid upstream URL")
 	ErrUpstreamDisabled       = errors.New("upstream is disabled")
+	ErrUpstreamInUse          = errors.New("upstream has bound gateway keys")
 )
 
 type AdminRepository interface {
@@ -229,6 +230,11 @@ func (r *Repository) DeleteUpstream(ctx context.Context, id string) error {
 		return fmt.Errorf("postgres disabled")
 	}
 	_, err := r.pool.Exec(ctx, `DELETE FROM upstream_configs WHERE id=$1`, id)
+	if isForeignKeyViolation(err) {
+		// The FK constraint on gateway_api_keys is the deletion guard: keys
+		// keep referencing the upstream until they are revoked and removed.
+		return ErrUpstreamInUse
+	}
 	return err
 }
 
@@ -268,4 +274,9 @@ func encryptSecret(secret string, key *internalcrypto.Key) ([]byte, error) {
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }
