@@ -287,6 +287,7 @@ func encryptSecret(secret string, key *internalcrypto.Key) ([]byte, error) {
 	}
 	return key.Encrypt([]byte(secret))
 }
+
 // HasUpstreamSecrets reports whether any upstream stores an encrypted API
 // key. Startup uses it to refuse a freshly generated encryption key that
 // would orphan existing ciphertexts.

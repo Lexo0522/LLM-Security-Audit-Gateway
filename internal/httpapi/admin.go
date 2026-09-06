@@ -555,6 +555,7 @@ func (a *Admin) createKey(c *fiber.Ctx) error {
 	a.emitOperation(c, "api_key_create", "tenant:"+record.TenantID, "success", record.ID)
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": record.ID, "tenant_id": record.TenantID, "upstream_id": record.UpstreamID, "display_name": record.DisplayName, "prefix": record.Prefix, "created_at": record.CreatedAt, "key": key})
 }
+
 // pageParams parses ?limit/&offset for list endpoints. limit 0 means "all"
 // for internal callers; the API defaults to 50 and never exceeds 200 rows.
 func pageParams(c *fiber.Ctx) (int, int) {
