@@ -79,6 +79,10 @@ curl http://localhost:8080/v1/chat/completions \
 docker compose -f deploy/docker-compose.yml up --build
 ```
 
+Docker image builds default to China-friendly mirrors (`goproxy.cn` for Go modules, `registry.npmmirror.com` for npm). If your build host can reach the official registries, copy `deploy/.env.example` to `deploy/.env` and point `DOCKER_BUILD_GOPROXY` / `DOCKER_NPM_REGISTRY` back at `proxy.golang.org` / `registry.npmjs.org` (pass `--env-file deploy/.env` when invoking compose from the repo root).
+
+`go test -race` requires cgo and a C toolchain; it runs in CI on Linux. On Windows hosts without GCC, run `make test` locally and let CI cover the race detector.
+
 Open `http://localhost:3000` to complete first-time administrator setup and sign in. The web service serves the SPA and proxies `/admin/v1` to the gateway admin listener, so the management port does not need to be exposed publicly. Add and test upstreams from the web UI, then issue gateway keys bound to those upstreams. The stack retains PostgreSQL, Redis, Kafka, ClickHouse, and the gateway key-encryption volume; no fixed upstream service is bundled. Back up the `gateway-keys` volume together with PostgreSQL: losing `/var/lib/gateway/keys/encryption.key` makes stored upstream API keys unrecoverable. The Compose defaults for database passwords are development-only and must be overridden in production.
 
 ## 当前边界

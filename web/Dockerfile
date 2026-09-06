@@ -1,4 +1,7 @@
 FROM node:22-alpine AS build
+# Registry override for restricted networks; package-lock.json keeps integrity.
+ARG NPM_REGISTRY=https://registry.npmjs.org
+RUN npm config set registry "$NPM_REGISTRY"
 WORKDIR /app
 COPY web/package*.json ./
 RUN npm ci

@@ -3,5 +3,6 @@ CLAUDE.md
 /.zcode/
 .env
 .env.*
+!deploy/.env.example
 /web/node_modules/
 /web/dist/

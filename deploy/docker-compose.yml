@@ -3,6 +3,8 @@ services:
     build:
       context: ..
       dockerfile: web/Dockerfile
+      args:
+        NPM_REGISTRY: ${DOCKER_NPM_REGISTRY:-https://registry.npmmirror.com}
     ports:
       - "3000:80"
     depends_on:
@@ -14,6 +16,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.gateway
+      args:
+        GOPROXY: ${DOCKER_BUILD_GOPROXY:-https://goproxy.cn,direct}
     ports:
       - "8080:8080"
     environment:
@@ -47,6 +51,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.gateway
+      args:
+        GOPROXY: ${DOCKER_BUILD_GOPROXY:-https://goproxy.cn,direct}
     entrypoint: ["/audit-consumer"]
     expose:
       - "9090"
