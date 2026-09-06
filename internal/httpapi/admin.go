@@ -102,20 +102,44 @@ type AuditReader interface {
 
 const adminSessionCookie = "gateway_admin_session"
 
+var errMissingSessionCookie = errors.New("session cookie is missing")
+
 func (a *Admin) authenticate(c *fiber.Ctx) error {
 	if a.Repo == nil {
 		return fiber.ErrServiceUnavailable
 	}
-	cookie := c.Cookies(adminSessionCookie)
-	if cookie == "" {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": fiber.Map{"message": "authentication required"}})
-	}
-	_, user, err := a.Repo.GetAdminSession(c.UserContext(), sessionHash(cookie))
+	user, err := a.sessionUser(c)
 	if err != nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": fiber.Map{"message": "authentication required"}})
 	}
 	c.Locals("admin_user", user)
 	return c.Next()
+}
+
+// sessionUser resolves the caller from the session cookie. It backs both the
+// authenticate middleware and the me endpoint, which calls it directly: a
+// terminal handler must not drive fiber's router through c.Next().
+func (a *Admin) sessionUser(c *fiber.Ctx) (storage.AdminUser, error) {
+	cookie := c.Cookies(adminSessionCookie)
+	if cookie == "" {
+		return storage.AdminUser{}, errMissingSessionCookie
+	}
+	_, user, err := a.Repo.GetAdminSession(c.UserContext(), sessionHash(cookie))
+	if err != nil {
+		return storage.AdminUser{}, err
+	}
+	return user, nil
+}
+
+func (a *Admin) me(c *fiber.Ctx) error {
+	if a.Repo == nil {
+		return fiber.ErrServiceUnavailable
+	}
+	user, err := a.sessionUser(c)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": fiber.Map{"message": "authentication required"}})
+	}
+	return c.JSON(user)
 }
 
 func sessionHash(token string) []byte { sum := sha256.Sum256([]byte(token)); return sum[:] }
@@ -236,16 +260,6 @@ func (a *Admin) logout(c *fiber.Ctx) error {
 	c.ClearCookie(adminSessionCookie)
 	c.ClearCookie("gateway_admin_csrf")
 	return c.SendStatus(http.StatusNoContent)
-}
-
-func (a *Admin) me(c *fiber.Ctx) error {
-	if err := a.authenticate(c); err != nil {
-		return err
-	}
-	if user, ok := c.Locals("admin_user").(storage.AdminUser); ok {
-		return c.JSON(user)
-	}
-	return fiber.ErrUnauthorized
 }
 
 func (a *Admin) create(c *fiber.Ctx) error {
