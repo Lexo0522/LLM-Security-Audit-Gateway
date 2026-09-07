@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,8 @@ import (
 	"github.com/example/ai-audit-gateway/internal/storage"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func newStorageRepo(t *testing.T) (*storage.Repository, *internalcrypto.Key) {
@@ -34,6 +37,9 @@ func newStorageRepo(t *testing.T) (*storage.Repository, *internalcrypto.Key) {
 	t.Cleanup(repo.Close)
 	if err := repo.Migrate(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if err := repo.Migrate(ctx); err != nil {
+		t.Fatalf("migration must be idempotent: %v", err)
 	}
 	key, err := internalcrypto.LoadOrCreate(filepath.Join(t.TempDir(), "integration-encryption.key"))
 	if err != nil {
@@ -123,11 +129,6 @@ func TestUpstreamLifecycleWithRealPostgres(t *testing.T) {
 		t.Fatalf("routeB=%+v err=%v", routeB, err)
 	}
 
-	// Deletion is blocked while keys reference the upstream.
-	if err = repo.DeleteUpstream(ctx, created.ID); !errors.Is(err, storage.ErrUpstreamInUse) {
-		t.Fatalf("delete with bound keys err=%v", err)
-	}
-
 	// Disabling the upstream cuts off its keys immediately.
 	if _, err = repo.UpdateUpstream(ctx, created.ID, nameA, "http://upstream-a", "", false, key); err != nil {
 		t.Fatal(err)
@@ -148,6 +149,96 @@ func TestUpstreamLifecycleWithRealPostgres(t *testing.T) {
 	}
 	if _, err = repo.GetUpstreamForGatewayKey(ctx, recordB.ID, key); err == nil {
 		t.Fatal("a revoked key must not resolve its upstream")
+	}
+
+	// Deletion immediately revokes the remaining key and erases the upstream secret.
+	deletion, err := repo.RequestUpstreamDeletion(ctx, uuid.MustParse(created.ID), time.Millisecond)
+	if err != nil || !deletion.Transitioned || deletion.RevokedKeys != 1 {
+		t.Fatalf("deletion=%+v err=%v", deletion, err)
+	}
+	if _, err = repo.GetUpstreamForGatewayKey(ctx, recordA.ID, key); err == nil {
+		t.Fatal("a deleting upstream must not resolve for its keys")
+	}
+	deleted, err := repo.GetUpstream(ctx, created.ID, key)
+	if err != nil || deleted.HasAPIKey || deleted.APIKey != "" || deleted.LifecycleState != storage.UpstreamLifecycleDeleting {
+		t.Fatalf("deleted upstream=%+v err=%v", deleted, err)
+	}
+	duplicate, err := repo.RequestUpstreamDeletion(ctx, uuid.MustParse(created.ID), time.Hour)
+	if err != nil || duplicate.Transitioned || duplicate.PurgeAfter == nil {
+		t.Fatalf("duplicate deletion=%+v err=%v", duplicate, err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if finalized, err := repo.FinalizeDueUpstreamDeletions(ctx, 10); err != nil || finalized != 1 {
+		t.Fatalf("finalized=%d err=%v", finalized, err)
+	}
+	if _, err = repo.GetUpstream(ctx, created.ID, key); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("purged upstream err=%v", err)
+	}
+}
+
+func TestAdminUpstreamDeletionHTTPContract(t *testing.T) {
+	ctx := context.Background()
+	repo, key := newStorageRepo(t)
+	username := "it-delete-admin-" + uuid.NewString()[:8]
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("integration-delete-password"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := repo.CreateAdminUser(ctx, username, passwordHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := uuid.NewString()
+	tokenHash := sha256.Sum256([]byte(token))
+	if _, err = repo.CreateAdminSession(ctx, user.ID, tokenHash[:], time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	upstream, err := repo.CreateUpstream(ctx, "it-http-delete-"+uuid.NewString()[:8], "http://upstream-delete", "delete-secret", true, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New()
+	(&httpapi.Admin{
+		Repo: repo, EncryptionKey: key, CookieSecureMode: "never",
+		UpstreamDeletionGracePeriod: time.Millisecond,
+	}).Register(app)
+	call := func(method, path string) (*http.Response, string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, nil)
+		req.Host = "localhost:3000"
+		req.Header.Set("Origin", "http://localhost:3000")
+		req.AddCookie(&http.Cookie{Name: "gateway_admin_session", Value: token})
+		resp, callErr := app.Test(req)
+		if callErr != nil {
+			t.Fatal(callErr)
+		}
+		raw, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return resp, string(raw)
+	}
+
+	invalid, _ := call(http.MethodDelete, "/admin/v1/upstreams/not-a-uuid")
+	if invalid.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid delete status=%d", invalid.StatusCode)
+	}
+	first, body := call(http.MethodDelete, "/admin/v1/upstreams/"+upstream.ID)
+	if first.StatusCode != http.StatusAccepted || !strings.Contains(body, `"lifecycle_state":"deleting"`) {
+		t.Fatalf("first delete status=%d body=%s", first.StatusCode, body)
+	}
+	second, body := call(http.MethodDelete, "/admin/v1/upstreams/"+upstream.ID)
+	if second.StatusCode != http.StatusAccepted || !strings.Contains(body, `"transitioned":false`) {
+		t.Fatalf("repeated delete status=%d body=%s", second.StatusCode, body)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if finalized, err := repo.FinalizeDueUpstreamDeletions(ctx, 10); err != nil || finalized != 1 {
+		t.Fatalf("finalized=%d err=%v", finalized, err)
+	}
+	missing, _ := call(http.MethodDelete, "/admin/v1/upstreams/"+upstream.ID)
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("purged delete status=%d", missing.StatusCode)
 	}
 }
 

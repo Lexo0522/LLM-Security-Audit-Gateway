@@ -9,50 +9,53 @@ import (
 )
 
 type Config struct {
-	Environment                  string
-	Version                      string
-	AllowDemoBootstrap           bool
-	UpstreamAllowPrivateNetworks bool
-	ListenAddr                   string
-	AdminAddr                    string
-	MaxBodyBytes                 int
-	MaxResponseBytes             int
-	RequestTimeoutMS             int
-	AuditEnabled                 bool
-	FailClosed                   bool
-	PostgresURL                  string
-	PostgresPoolMaxConns         int
-	PostgresConnMaxLifetimeMS    int
-	PostgresConnMaxIdleMS        int
-	OutboxClaimSize              int
-	RedisURL                     string
-	KafkaBrokers                 []string
-	KafkaAuditTopic              string
-	KafkaAuditDLQTopic           string
-	KafkaConsumerGroup           string
-	ClickHouseDSN                string
-	ConsumerListenAddr           string
-	EncryptionKeyFile            string
-	AdminSessionTTLMS            int
-	AdminCookieSecureMode        string
-	AdminTrustedOrigins          []string
-	AdminLoginMaxFailures        int
-	AdminLoginLockoutMS          int
-	RateLimitRPS                 int
-	RateLimitBurst               int
-	AuditorURL                   string
-	AuditorModel                 string
-	AuditorTimeoutMS             int
-	AuditorConcurrency           int
-	EventQueueSize               int
-	SSEAuditWindowBytes          int
-	SSEMaxEventBytes             int
-	HealthProbeIntervalMS        int
-	HealthProbeTimeoutMS         int
-	SnapshotRefreshIntervalMS    int
-	AuditRecordsRetentionDays    int
-	OutboxRetentionDays          int
-	RetentionSweepIntervalMS     int
+	Environment                     string
+	Version                         string
+	AllowDemoBootstrap              bool
+	UpstreamAllowPrivateNetworks    bool
+	ListenAddr                      string
+	AdminAddr                       string
+	MaxBodyBytes                    int
+	MaxResponseBytes                int
+	RequestTimeoutMS                int
+	AuditEnabled                    bool
+	FailClosed                      bool
+	PostgresURL                     string
+	PostgresPoolMaxConns            int
+	PostgresConnMaxLifetimeMS       int
+	PostgresConnMaxIdleMS           int
+	OutboxClaimSize                 int
+	RedisURL                        string
+	KafkaBrokers                    []string
+	KafkaAuditTopic                 string
+	KafkaAuditDLQTopic              string
+	KafkaConsumerGroup              string
+	ClickHouseDSN                   string
+	ConsumerListenAddr              string
+	EncryptionKeyFile               string
+	AdminSessionTTLMS               int
+	AdminCookieSecureMode           string
+	AdminTrustedOrigins             []string
+	AdminLoginMaxFailures           int
+	AdminLoginLockoutMS             int
+	RateLimitRPS                    int
+	RateLimitBurst                  int
+	AuditorURL                      string
+	AuditorModel                    string
+	AuditorTimeoutMS                int
+	AuditorConcurrency              int
+	EventQueueSize                  int
+	SSEAuditWindowBytes             int
+	SSEMaxEventBytes                int
+	HealthProbeIntervalMS           int
+	HealthProbeTimeoutMS            int
+	SnapshotRefreshIntervalMS       int
+	AuditRecordsRetentionDays       int
+	OutboxRetentionDays             int
+	RetentionSweepIntervalMS        int
+	UpstreamDeletionGracePeriodMS   int
+	UpstreamDeletionBatchSize       int
+	UpstreamDeletionSweepIntervalMS int
 }
 
 func Load() (Config, error) {
@@ -104,21 +107,24 @@ func Load() (Config, error) {
 		AdminLoginMaxFailures:        intOpt("ADMIN_LOGIN_MAX_FAILURES", 5),
 		AdminLoginLockoutMS:          intOpt("ADMIN_LOGIN_LOCKOUT_MS", 900000),
 
-		RateLimitRPS:              intOpt("RATE_LIMIT_RPS", 60),
-		RateLimitBurst:            intOpt("RATE_LIMIT_BURST", 120),
-		AuditorURL:                os.Getenv("AUDITOR_URL"),
-		AuditorModel:              env("AUDITOR_MODEL", "http-auditor"),
-		AuditorTimeoutMS:          intOpt("AUDITOR_TIMEOUT_MS", 350),
-		AuditorConcurrency:        intOpt("AUDITOR_CONCURRENCY", 8),
-		EventQueueSize:            intOpt("AUDIT_EVENT_QUEUE_SIZE", 1000),
-		SSEAuditWindowBytes:       intOpt("SSE_AUDIT_WINDOW_BYTES", 16<<10),
-		SSEMaxEventBytes:          intOpt("SSE_MAX_EVENT_BYTES", 256<<10),
-		HealthProbeIntervalMS:     intOpt("HEALTH_PROBE_INTERVAL_MS", 5000),
-		HealthProbeTimeoutMS:      intOpt("HEALTH_PROBE_TIMEOUT_MS", 750),
-		SnapshotRefreshIntervalMS: intOpt("SNAPSHOT_REFRESH_INTERVAL_MS", 30000),
-		AuditRecordsRetentionDays: intOpt("AUDIT_RECORDS_RETENTION_DAYS", 30),
-		OutboxRetentionDays:       intOpt("OUTBOX_RETENTION_DAYS", 7),
-		RetentionSweepIntervalMS:  intOpt("RETENTION_SWEEP_INTERVAL_MS", 3600000),
+		RateLimitRPS:                    intOpt("RATE_LIMIT_RPS", 60),
+		RateLimitBurst:                  intOpt("RATE_LIMIT_BURST", 120),
+		AuditorURL:                      os.Getenv("AUDITOR_URL"),
+		AuditorModel:                    env("AUDITOR_MODEL", "http-auditor"),
+		AuditorTimeoutMS:                intOpt("AUDITOR_TIMEOUT_MS", 350),
+		AuditorConcurrency:              intOpt("AUDITOR_CONCURRENCY", 8),
+		EventQueueSize:                  intOpt("AUDIT_EVENT_QUEUE_SIZE", 1000),
+		SSEAuditWindowBytes:             intOpt("SSE_AUDIT_WINDOW_BYTES", 16<<10),
+		SSEMaxEventBytes:                intOpt("SSE_MAX_EVENT_BYTES", 256<<10),
+		HealthProbeIntervalMS:           intOpt("HEALTH_PROBE_INTERVAL_MS", 5000),
+		HealthProbeTimeoutMS:            intOpt("HEALTH_PROBE_TIMEOUT_MS", 750),
+		SnapshotRefreshIntervalMS:       intOpt("SNAPSHOT_REFRESH_INTERVAL_MS", 30000),
+		AuditRecordsRetentionDays:       intOpt("AUDIT_RECORDS_RETENTION_DAYS", 30),
+		OutboxRetentionDays:             intOpt("OUTBOX_RETENTION_DAYS", 7),
+		RetentionSweepIntervalMS:        intOpt("RETENTION_SWEEP_INTERVAL_MS", 3600000),
+		UpstreamDeletionGracePeriodMS:   intOpt("UPSTREAM_DELETION_GRACE_PERIOD_MS", 86400000),
+		UpstreamDeletionBatchSize:       intOpt("UPSTREAM_DELETION_BATCH_SIZE", 100),
+		UpstreamDeletionSweepIntervalMS: intOpt("UPSTREAM_DELETION_SWEEP_INTERVAL_MS", 60000),
 	}
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)

@@ -55,9 +55,12 @@ type Admin struct {
 	TrustedOrigins   []string
 	LoginMaxFailures int
 	LoginLockout     time.Duration
-	logins           *loginGuard
-	dummyHash        []byte
-	throttle         *authThrottle
+	// UpstreamDeletionGracePeriod controls how long a logically deleted
+	// upstream remains observable before the finalizer purges it.
+	UpstreamDeletionGracePeriod time.Duration
+	logins                      *loginGuard
+	dummyHash                   []byte
+	throttle                    *authThrottle
 }
 
 // fail logs the underlying cause and returns a client-safe response. Only
@@ -76,8 +79,8 @@ func (a *Admin) fail(operation string, err error) error {
 	if errors.Is(err, storage.ErrDuplicateUpstreamName) || errors.Is(err, storage.ErrDuplicateAdminUsername) {
 		return fiber.NewError(fiber.StatusConflict, "name already exists")
 	}
-	if errors.Is(err, storage.ErrUpstreamInUse) {
-		return fiber.NewError(fiber.StatusConflict, "upstream has bound gateway keys")
+	if errors.Is(err, storage.ErrUpstreamDeleting) || errors.Is(err, storage.ErrUpstreamDisabled) {
+		return fiber.NewError(fiber.StatusConflict, err.Error())
 	}
 	if storage.IsNotFound(err) {
 		return fiber.ErrNotFound
@@ -541,12 +544,8 @@ func (a *Admin) createKey(c *fiber.Ctx) error {
 	if a.Repo == nil || input.UpstreamID == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "upstream_id is required")
 	}
-	bound, err := a.Repo.GetUpstream(c.UserContext(), input.UpstreamID, a.EncryptionKey)
-	if err != nil {
-		return a.fail("api_key_upstream_lookup", err)
-	}
-	if !bound.Enabled {
-		return fiber.NewError(fiber.StatusBadRequest, "upstream is disabled")
+	if _, err := uuid.Parse(input.UpstreamID); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid upstream_id")
 	}
 	record, key, err := a.Keys.CreateForUpstream(c.Context(), input.TenantID, input.UpstreamID, input.DisplayName)
 	if err != nil {
@@ -710,11 +709,26 @@ func (a *Admin) deleteUpstream(c *fiber.Ctx) error {
 	if a.Repo == nil {
 		return fiber.ErrServiceUnavailable
 	}
-	if err := a.Repo.DeleteUpstream(c.UserContext(), c.Params("id")); err != nil {
+	id := c.Params("id")
+	upstreamID, err := uuid.Parse(id)
+	if err != nil {
+		return fiber.NewError(http.StatusBadRequest, "invalid upstream id")
+	}
+	grace := a.UpstreamDeletionGracePeriod
+	if grace <= 0 {
+		grace = 24 * time.Hour
+	}
+	deletion, err := a.Repo.RequestUpstreamDeletion(c.UserContext(), upstreamID, grace)
+	if err != nil {
 		return a.fail("upstream_delete", err)
 	}
-	a.emitOperation(c, "upstream_delete", "", "success", c.Params("id"))
-	return c.SendStatus(http.StatusNoContent)
+	if deletion.Transitioned {
+		a.emitOperation(c, "upstream_delete_requested", "", "success", c.Params("id"), map[string]string{
+			"revoked_keys": strconv.FormatInt(deletion.RevokedKeys, 10),
+			"purge_after":  deletion.PurgeAfter.UTC().Format(time.RFC3339),
+		})
+	}
+	return c.Status(http.StatusAccepted).JSON(deletion)
 }
 
 func (a *Admin) testUpstream(c *fiber.Ctx) error {

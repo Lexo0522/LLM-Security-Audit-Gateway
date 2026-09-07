@@ -282,6 +282,7 @@ func main() {
 	readiness.Start(ctx)
 	go refreshSnapshots(ctx, time.Duration(cfg.SnapshotRefreshIntervalMS)*time.Millisecond, registry, policies, logger, metrics)
 	runRetentionSweeper(ctx, cfg, repo, logger, metrics)
+	runUpstreamDeletionFinalizer(ctx, cfg, repo, logger, metrics)
 	app := fiber.New(fiber.Config{BodyLimit: cfg.MaxBodyBytes, DisableStartupMessage: true})
 	handler := httpapi.New(cfg, registry, policies, keys, limiter, auditor, pipeline, metrics)
 	handler.SetShadowAuditor(shadowAuditor)
@@ -295,11 +296,12 @@ func main() {
 		(&httpapi.Admin{
 			Logger: logger, EncryptionKey: encryptionKey, Repo: repo, Rules: registry, Events: pipeline, Keys: keys, Policies: policies, Audit: auditStore,
 			UpstreamClient: upstreamClient, TargetPolicy: upstreamClient.TargetPolicy(),
-			SessionTTL:       time.Duration(cfg.AdminSessionTTLMS) * time.Millisecond,
-			CookieSecureMode: cfg.AdminCookieSecureMode,
-			TrustedOrigins:   cfg.AdminTrustedOrigins,
-			LoginMaxFailures: cfg.AdminLoginMaxFailures,
-			LoginLockout:     time.Duration(cfg.AdminLoginLockoutMS) * time.Millisecond,
+			SessionTTL:                  time.Duration(cfg.AdminSessionTTLMS) * time.Millisecond,
+			UpstreamDeletionGracePeriod: time.Duration(cfg.UpstreamDeletionGracePeriodMS) * time.Millisecond,
+			CookieSecureMode:            cfg.AdminCookieSecureMode,
+			TrustedOrigins:              cfg.AdminTrustedOrigins,
+			LoginMaxFailures:            cfg.AdminLoginMaxFailures,
+			LoginLockout:                time.Duration(cfg.AdminLoginLockoutMS) * time.Millisecond,
 			PolicyChanged: func(ctx context.Context) {
 				if policyNotifier != nil {
 					policyNotifier.Notify(ctx)
@@ -366,6 +368,42 @@ func refreshSnapshots(ctx context.Context, interval time.Duration, registry *rul
 			cancel()
 		}
 	}
+}
+
+// runUpstreamDeletionFinalizer periodically physically removes upstreams whose
+// deletion grace period has elapsed. The repository owns selection and locking;
+// this worker only supplies the bounded batch size and lifecycle context.
+func runUpstreamDeletionFinalizer(ctx context.Context, cfg config.Config, repo *storage.Repository, logger *slog.Logger, metrics *observability.Metrics) {
+	if cfg.UpstreamDeletionSweepIntervalMS <= 0 || repo == nil {
+		return
+	}
+	finalized := 0.0
+	go func() {
+		ticker := time.NewTicker(time.Duration(cfg.UpstreamDeletionSweepIntervalMS) * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sweepCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+				rows, err := repo.FinalizeDueUpstreamDeletions(sweepCtx, cfg.UpstreamDeletionBatchSize)
+				cancel()
+				if err != nil {
+					logger.Warn("upstream deletion finalization failed", slog.Any("error", err))
+					metrics.Inc("upstream_deletion_finalizer_total", map[string]string{"result": "error"})
+					metrics.Inc("upstream_deletion_finalizer_failures_total", nil)
+					continue
+				}
+				finalized += float64(rows)
+				metrics.Set("upstream_deletion_rows_finalized", finalized, nil)
+				metrics.Inc("upstream_deletion_finalizer_total", map[string]string{"result": "success"})
+				if rows > 0 {
+					logger.Info("upstream deletions finalized", slog.Int64("upstreams", rows))
+				}
+			}
+		}
+	}()
 }
 
 // runRetentionSweeper periodically deletes expired audit records and published

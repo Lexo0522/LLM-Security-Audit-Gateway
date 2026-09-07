@@ -350,11 +350,36 @@ func (r *Repository) SeedManagedConfiguration(ctx context.Context, definitions [
 	return tx.Commit(ctx)
 }
 func (r *Repository) CreateGatewayAPIKey(ctx context.Context, record auth.KeyRecord) (auth.KeyRecord, error) {
-	if r == nil {
+	if r == nil || r.pool == nil {
 		return auth.KeyRecord{}, fmt.Errorf("postgres disabled")
 	}
-	err := r.pool.QueryRow(ctx, `INSERT INTO gateway_api_keys(id,tenant_id,upstream_id,display_name,prefix,key_digest,key_salt) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING created_at`, record.ID, record.TenantID, nullableUUID(record.UpstreamID), nullableText(record.DisplayName), record.Prefix, record.KeyDigest, record.KeySalt).Scan(&record.CreatedAt)
-	return record, err
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return auth.KeyRecord{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var lifecycleState string
+	var enabled bool
+	err = tx.QueryRow(ctx, `SELECT lifecycle_state,enabled FROM upstream_configs WHERE id=$1 FOR UPDATE`, record.UpstreamID).Scan(&lifecycleState, &enabled)
+	if err == pgx.ErrNoRows {
+		return auth.KeyRecord{}, ErrUpstreamNotFound
+	}
+	if err != nil {
+		return auth.KeyRecord{}, err
+	}
+	if lifecycleState == UpstreamLifecycleDeleting {
+		return auth.KeyRecord{}, ErrUpstreamDeleting
+	}
+	if lifecycleState != UpstreamLifecycleActive || !enabled {
+		return auth.KeyRecord{}, ErrUpstreamDisabled
+	}
+	if err = tx.QueryRow(ctx, `INSERT INTO gateway_api_keys(id,tenant_id,upstream_id,display_name,prefix,key_digest,key_salt) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING created_at`, record.ID, record.TenantID, nullableUUID(record.UpstreamID), nullableText(record.DisplayName), record.Prefix, record.KeyDigest, record.KeySalt).Scan(&record.CreatedAt); err != nil {
+		return auth.KeyRecord{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return auth.KeyRecord{}, err
+	}
+	return record, nil
 }
 func (r *Repository) LookupGatewayAPIKey(ctx context.Context, id string) (auth.KeyRecord, bool, error) {
 	if r == nil {

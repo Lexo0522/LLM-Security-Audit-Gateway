@@ -9,6 +9,8 @@ import (
 	"time"
 
 	internalcrypto "github.com/example/ai-audit-gateway/internal/crypto"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -17,7 +19,8 @@ var (
 	ErrDuplicateUpstreamName  = errors.New("upstream name already exists")
 	ErrInvalidUpstreamURL     = errors.New("invalid upstream URL")
 	ErrUpstreamDisabled       = errors.New("upstream is disabled")
-	ErrUpstreamInUse          = errors.New("upstream has bound gateway keys")
+	ErrUpstreamDeleting       = errors.New("upstream is deleting")
+	ErrUpstreamNotFound       = fmt.Errorf("%w: upstream not found", pgx.ErrNoRows)
 )
 
 type AdminRepository interface {
@@ -120,6 +123,13 @@ func (r *Repository) RevokeAdminSessions(ctx context.Context, userID string, kep
 	return tag.RowsAffected(), nil
 }
 
+func upstreamLifecycle(enabled bool) string {
+	if enabled {
+		return UpstreamLifecycleActive
+	}
+	return UpstreamLifecycleDisabled
+}
+
 func ValidateUpstreamURL(raw string) error {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme != "https" && parsed.Scheme != "http" || parsed.Host == "" || parsed.User != nil {
@@ -144,8 +154,9 @@ func (r *Repository) CreateUpstream(ctx context.Context, name, baseURL, apiKey s
 	if err != nil {
 		return Upstream{}, err
 	}
+	lifecycleState := upstreamLifecycle(enabled)
 	var value Upstream
-	err = r.pool.QueryRow(ctx, `INSERT INTO upstream_configs(name,base_url,api_key_ciphertext,enabled) VALUES($1,$2,$3,$4) RETURNING id,name,base_url,enabled,(api_key_ciphertext IS NOT NULL),created_at,updated_at`, name, baseURL, ciphertext, enabled).Scan(&value.ID, &value.Name, &value.BaseURL, &value.Enabled, &value.HasAPIKey, &value.CreatedAt, &value.UpdatedAt)
+	err = r.pool.QueryRow(ctx, `INSERT INTO upstream_configs(name,base_url,api_key_ciphertext,enabled,lifecycle_state) VALUES($1,$2,$3,$4,$5) RETURNING id,name,base_url,enabled,lifecycle_state,lifecycle_state,delete_requested_at,purge_after,(api_key_ciphertext IS NOT NULL),created_at,updated_at`, name, baseURL, ciphertext, enabled, lifecycleState).Scan(&value.ID, &value.Name, &value.BaseURL, &value.Enabled, &value.LifecycleState, &value.Status, &value.DeleteRequestedAt, &value.PurgeAfter, &value.HasAPIKey, &value.CreatedAt, &value.UpdatedAt)
 	if isUniqueViolation(err) {
 		return Upstream{}, ErrDuplicateUpstreamName
 	}
@@ -158,7 +169,7 @@ func (r *Repository) GetUpstream(ctx context.Context, id string, key *internalcr
 	}
 	var value UpstreamSecret
 	var ciphertext []byte
-	err := r.pool.QueryRow(ctx, `SELECT id,name,base_url,enabled,(api_key_ciphertext IS NOT NULL),api_key_ciphertext,created_at,updated_at FROM upstream_configs WHERE id=$1`, id).Scan(&value.ID, &value.Name, &value.BaseURL, &value.Enabled, &value.HasAPIKey, &ciphertext, &value.CreatedAt, &value.UpdatedAt)
+	err := r.pool.QueryRow(ctx, `SELECT id,name,base_url,enabled,lifecycle_state,lifecycle_state,delete_requested_at,purge_after,(api_key_ciphertext IS NOT NULL),api_key_ciphertext,created_at,updated_at FROM upstream_configs WHERE id=$1`, id).Scan(&value.ID, &value.Name, &value.BaseURL, &value.Enabled, &value.LifecycleState, &value.Status, &value.DeleteRequestedAt, &value.PurgeAfter, &value.HasAPIKey, &ciphertext, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
 		return UpstreamSecret{}, err
 	}
@@ -189,7 +200,7 @@ func (r *Repository) ListUpstreams(ctx context.Context, limit, offset int) ([]Up
 	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM upstream_configs`).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	query := `SELECT id,name,base_url,enabled,(api_key_ciphertext IS NOT NULL),created_at,updated_at FROM upstream_configs ORDER BY name`
+	query := `SELECT id,name,base_url,enabled,lifecycle_state,lifecycle_state,delete_requested_at,purge_after,(api_key_ciphertext IS NOT NULL),created_at,updated_at FROM upstream_configs ORDER BY name`
 	args := []any{}
 	if limit > 0 {
 		query += ` LIMIT $1 OFFSET $2`
@@ -203,7 +214,7 @@ func (r *Repository) ListUpstreams(ctx context.Context, limit, offset int) ([]Up
 	result := []Upstream{}
 	for rows.Next() {
 		var v Upstream
-		if err := rows.Scan(&v.ID, &v.Name, &v.BaseURL, &v.Enabled, &v.HasAPIKey, &v.CreatedAt, &v.UpdatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.Name, &v.BaseURL, &v.Enabled, &v.LifecycleState, &v.Status, &v.DeleteRequestedAt, &v.PurgeAfter, &v.HasAPIKey, &v.CreatedAt, &v.UpdatedAt); err != nil {
 			return nil, 0, err
 		}
 		result = append(result, v)
@@ -231,9 +242,16 @@ func (r *Repository) UpdateUpstream(ctx context.Context, id, name, baseURL, apiK
 		if err != nil {
 			return Upstream{}, err
 		}
-		err = r.pool.QueryRow(ctx, `UPDATE upstream_configs SET name=$2,base_url=$3,api_key_ciphertext=$4,enabled=$5,updated_at=now() WHERE id=$1 RETURNING id,name,base_url,enabled,(api_key_ciphertext IS NOT NULL),created_at,updated_at`, id, name, baseURL, ciphertext, enabled).Scan(&value.ID, &value.Name, &value.BaseURL, &value.Enabled, &value.HasAPIKey, &value.CreatedAt, &value.UpdatedAt)
+		err = r.pool.QueryRow(ctx, `UPDATE upstream_configs SET name=$2,base_url=$3,api_key_ciphertext=$4,enabled=$5,lifecycle_state=$6,updated_at=now() WHERE id=$1 AND lifecycle_state IN ('active','disabled') RETURNING id,name,base_url,enabled,lifecycle_state,lifecycle_state,delete_requested_at,purge_after,(api_key_ciphertext IS NOT NULL),created_at,updated_at`, id, name, baseURL, ciphertext, enabled, upstreamLifecycle(enabled)).Scan(&value.ID, &value.Name, &value.BaseURL, &value.Enabled, &value.LifecycleState, &value.Status, &value.DeleteRequestedAt, &value.PurgeAfter, &value.HasAPIKey, &value.CreatedAt, &value.UpdatedAt)
 	} else {
-		err = r.pool.QueryRow(ctx, `UPDATE upstream_configs SET name=$2,base_url=$3,enabled=$4,updated_at=now() WHERE id=$1 RETURNING id,name,base_url,enabled,(api_key_ciphertext IS NOT NULL),created_at,updated_at`, id, name, baseURL, enabled).Scan(&value.ID, &value.Name, &value.BaseURL, &value.Enabled, &value.HasAPIKey, &value.CreatedAt, &value.UpdatedAt)
+		err = r.pool.QueryRow(ctx, `UPDATE upstream_configs SET name=$2,base_url=$3,enabled=$4,lifecycle_state=$5,updated_at=now() WHERE id=$1 AND lifecycle_state IN ('active','disabled') RETURNING id,name,base_url,enabled,lifecycle_state,lifecycle_state,delete_requested_at,purge_after,(api_key_ciphertext IS NOT NULL),created_at,updated_at`, id, name, baseURL, enabled, upstreamLifecycle(enabled)).Scan(&value.ID, &value.Name, &value.BaseURL, &value.Enabled, &value.LifecycleState, &value.Status, &value.DeleteRequestedAt, &value.PurgeAfter, &value.HasAPIKey, &value.CreatedAt, &value.UpdatedAt)
+	}
+	if err == pgx.ErrNoRows {
+		var state string
+		if stateErr := r.pool.QueryRow(ctx, `SELECT lifecycle_state FROM upstream_configs WHERE id=$1`, id).Scan(&state); stateErr == nil && state == UpstreamLifecycleDeleting {
+			return Upstream{}, ErrUpstreamDeleting
+		}
+		return Upstream{}, ErrUpstreamNotFound
 	}
 	if isUniqueViolation(err) {
 		return Upstream{}, ErrDuplicateUpstreamName
@@ -241,17 +259,102 @@ func (r *Repository) UpdateUpstream(ctx context.Context, id, name, baseURL, apiK
 	return value, err
 }
 
-func (r *Repository) DeleteUpstream(ctx context.Context, id string) error {
+// RequestUpstreamDeletion atomically transitions an upstream into deleting,
+// revokes its gateway keys, and erases its stored secret. It is idempotent.
+func (r *Repository) RequestUpstreamDeletion(ctx context.Context, id uuid.UUID, gracePeriods ...time.Duration) (UpstreamDeletion, error) {
 	if r == nil || r.pool == nil {
-		return fmt.Errorf("postgres disabled")
+		return UpstreamDeletion{}, fmt.Errorf("postgres disabled")
 	}
-	_, err := r.pool.Exec(ctx, `DELETE FROM upstream_configs WHERE id=$1`, id)
-	if isForeignKeyViolation(err) {
-		// The FK constraint on gateway_api_keys is the deletion guard: keys
-		// keep referencing the upstream until they are revoked and removed.
-		return ErrUpstreamInUse
+	gracePeriod := 24 * time.Hour
+	if len(gracePeriods) > 0 && gracePeriods[0] > 0 {
+		gracePeriod = gracePeriods[0]
 	}
-	return err
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return UpstreamDeletion{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var value UpstreamDeletion
+	err = tx.QueryRow(ctx, `SELECT id,name,base_url,enabled,lifecycle_state,lifecycle_state,delete_requested_at,purge_after,(api_key_ciphertext IS NOT NULL),created_at,updated_at FROM upstream_configs WHERE id=$1 FOR UPDATE`, id).Scan(&value.ID, &value.Name, &value.BaseURL, &value.Enabled, &value.LifecycleState, &value.Status, &value.DeleteRequestedAt, &value.PurgeAfter, &value.HasAPIKey, &value.CreatedAt, &value.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return UpstreamDeletion{Found: false}, ErrUpstreamNotFound
+	}
+	if err != nil {
+		return UpstreamDeletion{}, err
+	}
+	value.Found = true
+	if value.LifecycleState == UpstreamLifecycleDeleting {
+		value.Transitioned = false
+		if err := tx.Commit(ctx); err != nil {
+			return UpstreamDeletion{}, err
+		}
+		return value, nil
+	}
+	now := time.Now().UTC()
+	purgeAfter := now.Add(gracePeriod)
+	if _, err = tx.Exec(ctx, `UPDATE upstream_configs SET lifecycle_state='deleting',enabled=false,delete_requested_at=$2,purge_after=$3,api_key_ciphertext=NULL,updated_at=now() WHERE id=$1`, id, now, purgeAfter); err != nil {
+		return UpstreamDeletion{}, err
+	}
+	var revoked int64
+	if err = tx.QueryRow(ctx, `WITH revoked AS (UPDATE gateway_api_keys SET revoked_at=COALESCE(revoked_at,now()) WHERE upstream_id=$1 AND revoked_at IS NULL RETURNING 1) SELECT count(*) FROM revoked`, id).Scan(&revoked); err != nil {
+		return UpstreamDeletion{}, err
+	}
+	value.Enabled = false
+	value.LifecycleState = UpstreamLifecycleDeleting
+	value.Status = UpstreamLifecycleDeleting
+	value.DeleteRequestedAt = &now
+	value.PurgeAfter = &purgeAfter
+	value.HasAPIKey = false
+	value.Transitioned = true
+	value.RevokedKeys = revoked
+	if err = tx.Commit(ctx); err != nil {
+		return UpstreamDeletion{}, err
+	}
+	return value, nil
+}
+
+// FinalizeDueUpstreamDeletions physically removes due deleting upstreams and
+// their revoked gateway keys. Each upstream is processed in its own transaction.
+func (r *Repository) FinalizeDueUpstreamDeletions(ctx context.Context, limit int) (int64, error) {
+	if r == nil || r.pool == nil {
+		return 0, nil
+	}
+	if limit < 1 {
+		limit = 100
+	}
+	var finalized int64
+	for finalized < int64(limit) {
+		tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			return finalized, err
+		}
+		var id string
+		err = tx.QueryRow(ctx, `SELECT id FROM upstream_configs WHERE lifecycle_state='deleting' AND purge_after IS NOT NULL AND purge_after <= now() ORDER BY purge_after LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&id)
+		if err == pgx.ErrNoRows {
+			_ = tx.Rollback(ctx)
+			return finalized, nil
+		}
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return finalized, err
+		}
+		if _, err = tx.Exec(ctx, `DELETE FROM gateway_api_keys WHERE upstream_id=$1 AND revoked_at IS NOT NULL`, id); err != nil {
+			_ = tx.Rollback(ctx)
+			return finalized, err
+		}
+		if tag, deleteErr := tx.Exec(ctx, `DELETE FROM upstream_configs WHERE id=$1 AND lifecycle_state='deleting'`, id); deleteErr != nil {
+			_ = tx.Rollback(ctx)
+			return finalized, deleteErr
+		} else if tag.RowsAffected() != 1 {
+			_ = tx.Rollback(ctx)
+			return finalized, fmt.Errorf("upstream finalization lost %s", id)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return finalized, err
+		}
+		finalized++
+	}
+	return finalized, nil
 }
 
 // GetUpstreamForGatewayKey resolves the immutable key binding and enforces the
@@ -262,7 +365,7 @@ func (r *Repository) GetUpstreamForGatewayKey(ctx context.Context, keyID string,
 	}
 	var value UpstreamSecret
 	var ciphertext []byte
-	err := r.pool.QueryRow(ctx, `SELECT u.id,u.name,u.base_url,u.enabled,(u.api_key_ciphertext IS NOT NULL),u.api_key_ciphertext,u.created_at,u.updated_at FROM gateway_api_keys k JOIN upstream_configs u ON u.id=k.upstream_id WHERE k.id=$1 AND k.revoked_at IS NULL AND u.enabled`, keyID).Scan(&value.ID, &value.Name, &value.BaseURL, &value.Enabled, &value.HasAPIKey, &ciphertext, &value.CreatedAt, &value.UpdatedAt)
+	err := r.pool.QueryRow(ctx, `SELECT u.id,u.name,u.base_url,u.enabled,u.lifecycle_state,u.lifecycle_state,u.delete_requested_at,u.purge_after,(u.api_key_ciphertext IS NOT NULL),u.api_key_ciphertext,u.created_at,u.updated_at FROM gateway_api_keys k JOIN upstream_configs u ON u.id=k.upstream_id WHERE k.id=$1 AND k.revoked_at IS NULL AND u.lifecycle_state='active' AND u.enabled`, keyID).Scan(&value.ID, &value.Name, &value.BaseURL, &value.Enabled, &value.LifecycleState, &value.Status, &value.DeleteRequestedAt, &value.PurgeAfter, &value.HasAPIKey, &ciphertext, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
 		return UpstreamSecret{}, err
 	}

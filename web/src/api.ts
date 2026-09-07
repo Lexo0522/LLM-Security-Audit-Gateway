@@ -34,7 +34,25 @@ const json = (method: string, body?: unknown): RequestInit => ({ method, body: b
 
 export interface SetupStatus { initialized: boolean }
 export interface User { id?: string; username: string; created_at?: string }
-export interface Upstream { id: string; name: string; base_url: string; enabled: boolean; created_at?: string; updated_at?: string; has_api_key?: boolean }
+export type UpstreamLifecycleState = 'active' | 'disabled' | 'deleting' | (string & {})
+export interface Upstream {
+  id: string
+  name: string
+  base_url: string
+  enabled: boolean
+  lifecycle_state?: UpstreamLifecycleState
+  status?: UpstreamLifecycleState
+  delete_requested_at?: string
+  purge_after?: string
+  created_at?: string
+  updated_at?: string
+  has_api_key?: boolean
+}
+export interface UpstreamDeletion extends Upstream {
+  found: boolean
+  transitioned: boolean
+  revoked_keys: number
+}
 export interface GatewayKey { id: string; tenant_id: string; upstream_id: string; display_name?: string; prefix: string; created_at: string; revoked_at?: string }
 export interface RuleSet { version: string; scope: string; status: string; source?: string; rules: any[]; created_at?: string }
 export interface Policy { id?: string; scope: string; route_path: string; direction: string; monitor_at: number; intervention_at: number; intervention_action: string; auditor_failure_mode: string; revision?: number }
@@ -50,7 +68,7 @@ export const api = {
   upstreams: async (offset = 0, limit = 50) => await request<Upstream[]>(`/upstreams?limit=${limit}&offset=${offset}`),
   createUpstream: async (value: { name: string; base_url: string; api_key?: string; enabled: boolean }) => (await request<Upstream>('/upstreams', json('POST', value))).data,
   updateUpstream: async (id: string, value: { name: string; base_url: string; api_key?: string; enabled: boolean }) => (await request<Upstream>(`/upstreams/${id}`, json('PUT', value))).data,
-  deleteUpstream: async (id: string) => (await request<void>(`/upstreams/${id}`, { method: 'DELETE' })).data,
+  deleteUpstream: async (id: string) => (await request<UpstreamDeletion>(`/upstreams/${id}`, { method: 'DELETE' })).data,
   testUpstream: async (id: string) => (await request<{ ok: boolean; message?: string }>(`/upstreams/${id}/test`, { method: 'POST' })).data,
   keys: async (offset = 0, limit = 50) => await request<GatewayKey[]>(`/api-keys?limit=${limit}&offset=${offset}`),
   createKey: async (tenant_id: string, upstream_id: string, display_name?: string) => (await request<GatewayKey & { key: string }>('/api-keys', json('POST', { tenant_id, upstream_id, display_name }))).data,

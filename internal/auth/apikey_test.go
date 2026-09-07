@@ -10,11 +10,15 @@ import (
 )
 
 type memoryStore struct {
-	keys map[string]KeyRecord
-	err  error
+	keys      map[string]KeyRecord
+	err       error
+	createErr error
 }
 
 func (s *memoryStore) CreateGatewayAPIKey(_ context.Context, record KeyRecord) (KeyRecord, error) {
+	if s.createErr != nil {
+		return KeyRecord{}, s.createErr
+	}
 	if s.keys == nil {
 		s.keys = map[string]KeyRecord{}
 	}
@@ -66,6 +70,17 @@ func TestGatewayAPIKeyFormatAndDigestAuthentication(t *testing.T) {
 	}
 }
 
+func TestGatewayAPIKeyCreatePropagatesStoreStateError(t *testing.T) {
+	storeErr := errors.New("upstream is deleting")
+	manager, err := NewManager(&memoryStore{createErr: storeErr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = manager.CreateForUpstream(t.Context(), "tenant-a", uuid.NewString(), "test")
+	if !errors.Is(err, storeErr) {
+		t.Fatalf("create error=%v, want %v", err, storeErr)
+	}
+}
 func TestGatewayAPIKeyRejectsRevokedAndUnavailableKeys(t *testing.T) {
 	store := &memoryStore{}
 	manager, _ := NewManager(store)
