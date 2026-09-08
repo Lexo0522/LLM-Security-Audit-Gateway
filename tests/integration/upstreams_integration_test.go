@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -168,8 +170,9 @@ func TestUpstreamLifecycleWithRealPostgres(t *testing.T) {
 		t.Fatalf("duplicate deletion=%+v err=%v", duplicate, err)
 	}
 	time.Sleep(10 * time.Millisecond)
-	if finalized, err := repo.FinalizeDueUpstreamDeletions(ctx, 10); err != nil || finalized != 1 {
-		t.Fatalf("finalized=%d err=%v", finalized, err)
+	result, err := repo.FinalizeDueUpstreamDeletionsResult(ctx, 10)
+	if err != nil || result.Finalized != 1 {
+		t.Fatalf("finalization result=%+v err=%v", result, err)
 	}
 	if _, err = repo.GetUpstream(ctx, created.ID, key); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("purged upstream err=%v", err)
@@ -245,6 +248,393 @@ func TestAdminUpstreamDeletionHTTPContract(t *testing.T) {
 	missing, _ := call(http.MethodDelete, "/admin/v1/upstreams/"+upstream.ID)
 	if missing.StatusCode != http.StatusNotFound {
 		t.Fatalf("purged delete status=%d", missing.StatusCode)
+	}
+}
+
+func newIntegrationPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, os.Getenv("POSTGRES_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func waitForUpstreamDue(t *testing.T, pool *pgxpool.Pool, id string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var due bool
+		err := pool.QueryRow(context.Background(), `SELECT purge_after <= now() FROM upstream_configs WHERE id=$1`, id).Scan(&due)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if due {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("upstream %s did not become due", id)
+}
+
+func cleanupTestUpstream(repo *storage.Repository, pool *pgxpool.Pool, id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var due bool
+		err := pool.QueryRow(ctx, `SELECT purge_after <= now() FROM upstream_configs WHERE id=$1 AND lifecycle_state='deleting'`, id).Scan(&due)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return
+		}
+		if err != nil {
+			return
+		}
+		if due {
+			_, _ = repo.FinalizeDueUpstreamDeletionsResult(ctx, 100)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestConcurrentCreateKeyAndUpstreamDelete(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	repo, key := newStorageRepo(t)
+	manager, err := auth.NewManager(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant := "it-concurrent-create-delete-" + uuid.NewString()[:8]
+	upstream, err := repo.CreateUpstream(ctx, tenant, "http://upstream-create-delete", "create-delete-secret", true, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := newIntegrationPool(t)
+	t.Cleanup(func() { cleanupTestUpstream(repo, pool, upstream.ID) })
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	createResult := make(chan struct {
+		record auth.KeyRecord
+		err    error
+	}, 1)
+	deleteResult := make(chan struct {
+		value storage.UpstreamDeletion
+		err   error
+	}, 1)
+	go func() {
+		defer wg.Done()
+		<-start
+		record, _, createErr := manager.CreateForUpstream(ctx, tenant, upstream.ID, "race")
+		createResult <- struct {
+			record auth.KeyRecord
+			err    error
+		}{record: record, err: createErr}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		value, deleteErr := repo.RequestUpstreamDeletion(ctx, uuid.MustParse(upstream.ID), time.Millisecond)
+		deleteResult <- struct {
+			value storage.UpstreamDeletion
+			err   error
+		}{value: value, err: deleteErr}
+	}()
+	close(start)
+	wg.Wait()
+	created := <-createResult
+	deleted := <-deleteResult
+	if deleted.err != nil || !deleted.value.Transitioned {
+		t.Fatalf("deletion=%+v err=%v", deleted.value, deleted.err)
+	}
+	if created.err != nil && !errors.Is(created.err, storage.ErrUpstreamDeleting) {
+		t.Fatalf("create err=%v", created.err)
+	}
+
+	stored, err := repo.GetUpstream(ctx, upstream.ID, key)
+	if err != nil || stored.LifecycleState != storage.UpstreamLifecycleDeleting || stored.HasAPIKey || stored.APIKey != "" {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+	keys, total, err := manager.List(ctx, tenant, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.err != nil {
+		if total != 0 {
+			t.Fatalf("failed create left keys=%+v total=%d", keys, total)
+		}
+		return
+	}
+	if total != 1 || len(keys) != 1 || keys[0].ID != created.record.ID || keys[0].RevokedAt == nil {
+		t.Fatalf("created key was not revoked: keys=%+v total=%d", keys, total)
+	}
+	if _, err := repo.GetUpstreamForGatewayKey(ctx, created.record.ID, key); err == nil {
+		t.Fatal("a key created before deletion must not route after deletion commits")
+	}
+}
+
+func TestConcurrentUpdateAndUpstreamDelete(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	repo, key := newStorageRepo(t)
+	upstream, err := repo.CreateUpstream(ctx, "it-concurrent-update-delete-"+uuid.NewString()[:8], "http://upstream-update-delete", "update-delete-secret", true, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := newIntegrationPool(t)
+	t.Cleanup(func() { cleanupTestUpstream(repo, pool, upstream.ID) })
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	updateResult := make(chan error, 1)
+	deleteResult := make(chan struct {
+		value storage.UpstreamDeletion
+		err   error
+	}, 1)
+	go func() {
+		defer wg.Done()
+		<-start
+		_, updateErr := repo.UpdateUpstream(ctx, upstream.ID, upstream.Name+"-updated", "http://upstream-update-delete-v2", "rotated-after-race", true, key)
+		updateResult <- updateErr
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		value, deleteErr := repo.RequestUpstreamDeletion(ctx, uuid.MustParse(upstream.ID), time.Millisecond)
+		deleteResult <- struct {
+			value storage.UpstreamDeletion
+			err   error
+		}{value: value, err: deleteErr}
+	}()
+	close(start)
+	wg.Wait()
+	updateErr := <-updateResult
+	deleted := <-deleteResult
+	if deleted.err != nil || !deleted.value.Transitioned {
+		t.Fatalf("deletion=%+v err=%v", deleted.value, deleted.err)
+	}
+	if updateErr != nil && !errors.Is(updateErr, storage.ErrUpstreamDeleting) {
+		t.Fatalf("update err=%v", updateErr)
+	}
+	stored, err := repo.GetUpstream(ctx, upstream.ID, key)
+	if err != nil || stored.LifecycleState != storage.UpstreamLifecycleDeleting || stored.Enabled || stored.HasAPIKey || stored.APIKey != "" {
+		t.Fatalf("deleting upstream was not terminal: %+v err=%v", stored, err)
+	}
+	duplicate, err := repo.RequestUpstreamDeletion(ctx, uuid.MustParse(upstream.ID), time.Nanosecond)
+	if err != nil || duplicate.Transitioned || duplicate.PurgeAfter == nil || deleted.value.PurgeAfter == nil || duplicate.PurgeAfter.Sub(*deleted.value.PurgeAfter) > time.Microsecond || duplicate.PurgeAfter.Sub(*deleted.value.PurgeAfter) < -time.Microsecond {
+		t.Fatalf("duplicate deletion=%+v first=%+v err=%v", duplicate, deleted.value, err)
+	}
+	if _, err := repo.UpdateUpstream(ctx, upstream.ID, "it-should-not-revive", "http://revive.invalid", "", true, key); !errors.Is(err, storage.ErrUpstreamDeleting) {
+		t.Fatalf("update after deletion err=%v, want ErrUpstreamDeleting", err)
+	}
+}
+
+func TestConcurrentUpstreamFinalizers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	repo, key := newStorageRepo(t)
+	manager, err := auth.NewManager(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant := "it-concurrent-finalizer-" + uuid.NewString()[:8]
+	upstream, err := repo.CreateUpstream(ctx, "it-concurrent-finalizer-one-"+uuid.NewString()[:8], "http://finalizer-one", "finalizer-one-secret", true, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, _, err := manager.CreateForUpstream(ctx, tenant, upstream.ID, "one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RequestUpstreamDeletion(ctx, uuid.MustParse(upstream.ID), time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	pool := newIntegrationPool(t)
+	waitForUpstreamDue(t, pool, upstream.ID)
+
+	start := make(chan struct{})
+	results := make(chan struct {
+		value storage.UpstreamFinalizationResult
+		err   error
+	}, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			value, finalizeErr := repo.FinalizeDueUpstreamDeletionsResult(ctx, 1)
+			results <- struct {
+				value storage.UpstreamFinalizationResult
+				err   error
+			}{value: value, err: finalizeErr}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	first, second := <-results, <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("finalizer errors: first=%v second=%v", first.err, second.err)
+	}
+	if first.value.Finalized+second.value.Finalized != 1 || first.value.RevokedKeys+second.value.RevokedKeys != 1 {
+		t.Fatalf("duplicate finalization: first=%+v second=%+v", first.value, second.value)
+	}
+	if _, err := repo.GetUpstream(ctx, upstream.ID, key); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("upstream finalization err=%v", err)
+	}
+	if _, found, err := repo.LookupGatewayAPIKey(ctx, record.ID); err != nil || found {
+		t.Fatalf("gateway key after finalization found=%v err=%v", found, err)
+	}
+
+	batchTenant := "it-concurrent-finalizer-batch-" + uuid.NewString()[:8]
+	ids := make([]string, 0, 4)
+	for i := 0; i < 4; i++ {
+		value, createErr := repo.CreateUpstream(ctx, fmt.Sprintf("it-concurrent-finalizer-batch-%d-%s", i, uuid.NewString()[:8]), "http://finalizer-batch", "batch-secret", true, key)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, _, createErr = manager.CreateForUpstream(ctx, batchTenant, value.ID, fmt.Sprintf("batch-%d", i)); createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, deleteErr := repo.RequestUpstreamDeletion(ctx, uuid.MustParse(value.ID), time.Millisecond); deleteErr != nil {
+			t.Fatal(deleteErr)
+		}
+		waitForUpstreamDue(t, pool, value.ID)
+		ids = append(ids, value.ID)
+	}
+	batchResults := make(chan struct {
+		value storage.UpstreamFinalizationResult
+		err   error
+	}, 2)
+	start = make(chan struct{})
+	wg = sync.WaitGroup{}
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			value, finalizeErr := repo.FinalizeDueUpstreamDeletionsResult(ctx, len(ids))
+			batchResults <- struct {
+				value storage.UpstreamFinalizationResult
+				err   error
+			}{value: value, err: finalizeErr}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	var finalized, revokedKeys int64
+	for i := 0; i < 2; i++ {
+		result := <-batchResults
+		if result.err != nil {
+			t.Fatalf("batch finalizer err=%v result=%+v", result.err, result.value)
+		}
+		finalized += result.value.Finalized
+		revokedKeys += result.value.RevokedKeys
+	}
+	if finalized != int64(len(ids)) || revokedKeys != int64(len(ids)) {
+		t.Fatalf("batch finalized=%d revoked_keys=%d want=%d", finalized, revokedKeys, len(ids))
+	}
+	for _, id := range ids {
+		if _, err := repo.GetUpstream(ctx, id, key); !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("batch upstream %s err=%v", id, err)
+		}
+	}
+}
+
+func TestUpstreamFinalizerPartialFailureRecovery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	repo, key := newStorageRepo(t)
+	manager, err := auth.NewManager(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := newIntegrationPool(t)
+	triggerName := "it_fail_finalizer_delete_trigger"
+	functionName := "it_fail_finalizer_delete"
+	_, _ = pool.Exec(ctx, `DROP TRIGGER IF EXISTS `+triggerName+` ON upstream_configs`)
+	_, _ = pool.Exec(ctx, `DROP FUNCTION IF EXISTS `+functionName+`()`)
+	_, err = pool.Exec(ctx, `CREATE FUNCTION `+functionName+`() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.name LIKE 'it-fault-finalizer-fail-%' THEN RAISE EXCEPTION 'injected finalizer delete failure'; END IF; RETURN OLD; END; $$`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = pool.Exec(ctx, `CREATE TRIGGER `+triggerName+` BEFORE DELETE ON upstream_configs FOR EACH ROW EXECUTE FUNCTION `+functionName+`()`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DROP TRIGGER IF EXISTS `+triggerName+` ON upstream_configs`)
+		_, _ = pool.Exec(context.Background(), `DROP FUNCTION IF EXISTS `+functionName+`()`)
+	}()
+
+	first, err := repo.CreateUpstream(ctx, "it-fault-finalizer-ok-"+uuid.NewString()[:8], "http://fault-finalizer-ok", "first-secret", true, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := repo.CreateUpstream(ctx, "it-fault-finalizer-fail-"+uuid.NewString()[:8], "http://fault-finalizer-fail", "second-secret", true, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []struct {
+		id     string
+		tenant string
+		name   string
+	}{
+		{id: first.ID, tenant: "it-fault-finalizer-ok", name: "first"},
+		{id: failed.ID, tenant: "it-fault-finalizer-fail", name: "second"},
+	} {
+		if _, _, err := manager.CreateForUpstream(ctx, value.tenant, value.id, value.name); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.RequestUpstreamDeletion(ctx, uuid.MustParse(value.id), time.Millisecond); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitForUpstreamDue(t, pool, first.ID)
+	waitForUpstreamDue(t, pool, failed.ID)
+
+	result, err := repo.FinalizeDueUpstreamDeletionsResult(ctx, 10)
+	if err == nil || result.Finalized != 1 || result.RevokedKeys != 1 {
+		t.Fatalf("partial result=%+v err=%v", result, err)
+	}
+	if _, err := repo.GetUpstream(ctx, first.ID, key); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("successful upstream was not finalized: %v", err)
+	}
+	remaining, err := repo.GetUpstream(ctx, failed.ID, key)
+	if err != nil || remaining.LifecycleState != storage.UpstreamLifecycleDeleting || remaining.HasAPIKey {
+		t.Fatalf("failed upstream state=%+v err=%v", remaining, err)
+	}
+	backlog, err := repo.GetUpstreamDeletionBacklog(ctx)
+	if err != nil || backlog.Pending != 1 || backlog.Due != 1 {
+		t.Fatalf("partial backlog=%+v err=%v", backlog, err)
+	}
+	keys, total, err := manager.List(ctx, "it-fault-finalizer-fail", 0, 0)
+	if err != nil || total != 1 || len(keys) != 1 || keys[0].RevokedAt == nil {
+		t.Fatalf("failed key state=%+v total=%d err=%v", keys, total, err)
+	}
+
+	if _, err := pool.Exec(ctx, `DROP TRIGGER IF EXISTS `+triggerName+` ON upstream_configs`); err != nil {
+		t.Fatal(err)
+	}
+	result, err = repo.FinalizeDueUpstreamDeletionsResult(ctx, 10)
+	if err != nil || result.Finalized != 1 || result.RevokedKeys != 1 || result.Backlog.Pending != 0 {
+		t.Fatalf("recovery result=%+v err=%v", result, err)
+	}
+	if _, err := repo.GetUpstream(ctx, failed.ID, key); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("failed upstream was not recovered: %v", err)
 	}
 }
 
