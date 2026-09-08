@@ -1,5 +1,5 @@
--- Current schema. This migration is intentionally destructive: deployments must
--- recreate the PostgreSQL volume when upgrading from the pre-admin schema.
+-- Current schema for fresh databases. Unsupported historical schemas are rejected
+-- by the migration runner instead of being silently treated as upgraded.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS admin_users (

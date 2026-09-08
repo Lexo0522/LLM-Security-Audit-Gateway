@@ -313,48 +313,94 @@ func (r *Repository) RequestUpstreamDeletion(ctx context.Context, id uuid.UUID, 
 	return value, nil
 }
 
+// GetUpstreamDeletionBacklog returns the authoritative deletion state from
+// PostgreSQL. Malformed deleting rows are reported separately because the
+// finalizer cannot safely purge them.
+func (r *Repository) GetUpstreamDeletionBacklog(ctx context.Context) (UpstreamDeletionBacklog, error) {
+	if r == nil || r.pool == nil {
+		return UpstreamDeletionBacklog{}, fmt.Errorf("postgres disabled")
+	}
+	var backlog UpstreamDeletionBacklog
+	var oldest *time.Time
+	err := r.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE lifecycle_state='deleting'), count(*) FILTER (WHERE lifecycle_state='deleting' AND delete_requested_at IS NOT NULL AND purge_after IS NOT NULL AND purge_after >= delete_requested_at AND purge_after <= now()), count(*) FILTER (WHERE lifecycle_state='deleting' AND (delete_requested_at IS NULL OR purge_after IS NULL OR purge_after < delete_requested_at)), min(purge_after) FILTER (WHERE lifecycle_state='deleting' AND purge_after IS NOT NULL) FROM upstream_configs`).Scan(&backlog.Pending, &backlog.Due, &backlog.Malformed, &oldest)
+	if err != nil {
+		return UpstreamDeletionBacklog{}, err
+	}
+	backlog.OldestPurgeAfter = oldest
+	if oldest != nil {
+		backlog.OldestOverdueSeconds = time.Since(oldest.UTC()).Seconds()
+		if backlog.OldestOverdueSeconds < 0 {
+			backlog.OldestOverdueSeconds = 0
+		}
+	}
+	return backlog, nil
+}
+
 // FinalizeDueUpstreamDeletions physically removes due deleting upstreams and
 // their revoked gateway keys. Each upstream is processed in its own transaction.
 func (r *Repository) FinalizeDueUpstreamDeletions(ctx context.Context, limit int) (int64, error) {
+	result, err := r.FinalizeDueUpstreamDeletionsResult(ctx, limit)
+	return result.Finalized, err
+}
+
+// FinalizeDueUpstreamDeletionsResult reports committed work and the remaining
+// database-backed backlog. Each upstream is processed in its own transaction.
+func (r *Repository) FinalizeDueUpstreamDeletionsResult(ctx context.Context, limit int) (UpstreamFinalizationResult, error) {
 	if r == nil || r.pool == nil {
-		return 0, nil
+		return UpstreamFinalizationResult{}, nil
 	}
 	if limit < 1 {
 		limit = 100
 	}
-	var finalized int64
-	for finalized < int64(limit) {
+	var result UpstreamFinalizationResult
+	for result.Finalized < int64(limit) {
 		tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 		if err != nil {
-			return finalized, err
+			return r.finalizationResult(ctx, result, err)
 		}
 		var id string
-		err = tx.QueryRow(ctx, `SELECT id FROM upstream_configs WHERE lifecycle_state='deleting' AND purge_after IS NOT NULL AND purge_after <= now() ORDER BY purge_after LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&id)
+		err = tx.QueryRow(ctx, `SELECT id FROM upstream_configs WHERE lifecycle_state='deleting' AND delete_requested_at IS NOT NULL AND purge_after IS NOT NULL AND purge_after >= delete_requested_at AND purge_after <= now() ORDER BY purge_after LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&id)
 		if err == pgx.ErrNoRows {
 			_ = tx.Rollback(ctx)
-			return finalized, nil
+			return r.finalizationResult(ctx, result, nil)
 		}
 		if err != nil {
 			_ = tx.Rollback(ctx)
-			return finalized, err
+			return r.finalizationResult(ctx, result, err)
 		}
-		if _, err = tx.Exec(ctx, `DELETE FROM gateway_api_keys WHERE upstream_id=$1 AND revoked_at IS NOT NULL`, id); err != nil {
+		var revokedKeys int64
+		if tag, deleteErr := tx.Exec(ctx, `DELETE FROM gateway_api_keys WHERE upstream_id=$1 AND revoked_at IS NOT NULL`, id); deleteErr != nil {
 			_ = tx.Rollback(ctx)
-			return finalized, err
+			return r.finalizationResult(ctx, result, deleteErr)
+		} else {
+			revokedKeys = tag.RowsAffected()
 		}
 		if tag, deleteErr := tx.Exec(ctx, `DELETE FROM upstream_configs WHERE id=$1 AND lifecycle_state='deleting'`, id); deleteErr != nil {
 			_ = tx.Rollback(ctx)
-			return finalized, deleteErr
+			return r.finalizationResult(ctx, result, deleteErr)
 		} else if tag.RowsAffected() != 1 {
 			_ = tx.Rollback(ctx)
-			return finalized, fmt.Errorf("upstream finalization lost %s", id)
+			return r.finalizationResult(ctx, result, fmt.Errorf("upstream finalization lost %s", id))
 		}
 		if err = tx.Commit(ctx); err != nil {
-			return finalized, err
+			return r.finalizationResult(ctx, result, err)
 		}
-		finalized++
+		result.Finalized++
+		result.RevokedKeys += revokedKeys
 	}
-	return finalized, nil
+	return r.finalizationResult(ctx, result, nil)
+}
+
+func (r *Repository) finalizationResult(ctx context.Context, result UpstreamFinalizationResult, cause error) (UpstreamFinalizationResult, error) {
+	backlog, err := r.GetUpstreamDeletionBacklog(ctx)
+	result.Backlog = backlog
+	if cause != nil {
+		if err != nil {
+			return result, fmt.Errorf("%w; read deletion backlog: %v", cause, err)
+		}
+		return result, cause
+	}
+	return result, err
 }
 
 // GetUpstreamForGatewayKey resolves the immutable key binding and enforces the

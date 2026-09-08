@@ -2,7 +2,7 @@ BINARY := ai-audit-gateway
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test race vet lint fuzz integration smoke docker clean
+.PHONY: build test race vet lint fuzz integration migration-rehearsal smoke docker clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/gateway ./cmd/gateway
@@ -29,6 +29,9 @@ fuzz:
 
 integration:
 	./tests/integration/run-compose.ps1
+
+migration-rehearsal:
+	./tests/integration/run-migration-rehearsal.ps1
 
 # Full-stack smoke test: builds the images, boots a dedicated compose project
 # with fresh volumes, exercises the admin/proxy acceptance path, tears down.

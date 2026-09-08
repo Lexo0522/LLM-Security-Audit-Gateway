@@ -378,7 +378,18 @@ func runUpstreamDeletionFinalizer(ctx context.Context, cfg config.Config, repo *
 		return
 	}
 	finalized := 0.0
+	updateBacklog := func(backlog storage.UpstreamDeletionBacklog) {
+		metrics.Set("upstream_deletion_backlog", float64(backlog.Pending), nil)
+		metrics.Set("upstream_deletion_due", float64(backlog.Due), nil)
+		metrics.Set("upstream_deletion_malformed", float64(backlog.Malformed), nil)
+		metrics.Set("upstream_deletion_oldest_age_seconds", backlog.OldestOverdueSeconds, nil)
+	}
 	go func() {
+		if backlog, err := repo.GetUpstreamDeletionBacklog(ctx); err != nil {
+			logger.Warn("upstream deletion backlog refresh failed", slog.Any("error", err))
+		} else {
+			updateBacklog(backlog)
+		}
 		ticker := time.NewTicker(time.Duration(cfg.UpstreamDeletionSweepIntervalMS) * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -386,20 +397,31 @@ func runUpstreamDeletionFinalizer(ctx context.Context, cfg config.Config, repo *
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				started := time.Now()
 				sweepCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-				rows, err := repo.FinalizeDueUpstreamDeletions(sweepCtx, cfg.UpstreamDeletionBatchSize)
+				result, err := repo.FinalizeDueUpstreamDeletionsResult(sweepCtx, cfg.UpstreamDeletionBatchSize)
 				cancel()
+				metrics.Observe("upstream_deletion_finalizer_duration_seconds", time.Since(started).Seconds(), nil)
+				updateBacklog(result.Backlog)
 				if err != nil {
-					logger.Warn("upstream deletion finalization failed", slog.Any("error", err))
+					logger.Warn("upstream deletion finalization failed", slog.Any("error", err), slog.Int64("finalized", result.Finalized), slog.Int64("revoked_keys", result.RevokedKeys), slog.Int64("backlog", result.Backlog.Pending), slog.Int64("due", result.Backlog.Due))
+					metrics.Set("upstream_deletion_finalizer_last_error_timestamp", float64(time.Now().Unix()), nil)
 					metrics.Inc("upstream_deletion_finalizer_total", map[string]string{"result": "error"})
 					metrics.Inc("upstream_deletion_finalizer_failures_total", nil)
+					metrics.Inc("upstream_deletion_finalizer_retries_total", nil)
 					continue
 				}
-				finalized += float64(rows)
+				metrics.Set("upstream_deletion_finalizer_last_success_timestamp", float64(time.Now().Unix()), nil)
+				if result.Finalized == 0 && result.Backlog.Due > 0 {
+					metrics.Set("upstream_deletion_finalizer_zero_progress_timestamp", float64(time.Now().Unix()), nil)
+				}
+				finalized += float64(result.Finalized)
 				metrics.Set("upstream_deletion_rows_finalized", finalized, nil)
+				metrics.Add("upstream_deletion_finalized_total", uint64(result.Finalized), nil)
+				metrics.Add("upstream_deletion_keys_revoked_total", uint64(result.RevokedKeys), nil)
 				metrics.Inc("upstream_deletion_finalizer_total", map[string]string{"result": "success"})
-				if rows > 0 {
-					logger.Info("upstream deletions finalized", slog.Int64("upstreams", rows))
+				if result.Finalized > 0 {
+					logger.Info("upstream deletions finalized", slog.Int64("upstreams", result.Finalized), slog.Int64("revoked_keys", result.RevokedKeys), slog.Int64("backlog", result.Backlog.Pending))
 				}
 			}
 		}
