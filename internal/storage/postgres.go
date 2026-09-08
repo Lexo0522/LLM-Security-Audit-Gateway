@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"database/sql"
-	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,9 +18,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-//go:embed migrations/*.sql
-var migrations embed.FS
 
 type RuleSet struct {
 	Version   string            `json:"version"`
@@ -96,25 +92,6 @@ func (r *Repository) EnableOutbox(enabled bool) {
 	if r != nil {
 		r.outboxEnabled.Store(enabled)
 	}
-}
-func (r *Repository) Migrate(ctx context.Context) error {
-	if r == nil {
-		return nil
-	}
-	files, err := migrations.ReadDir("migrations")
-	if err != nil {
-		return err
-	}
-	for _, f := range files {
-		data, err := migrations.ReadFile("migrations/" + f.Name())
-		if err != nil {
-			return err
-		}
-		if _, err = r.pool.Exec(ctx, string(data)); err != nil {
-			return fmt.Errorf("migration %s: %w", f.Name(), err)
-		}
-	}
-	return nil
 }
 func (r *Repository) Ping(ctx context.Context) error {
 	if r == nil || r.pool == nil {

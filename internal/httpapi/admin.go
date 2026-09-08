@@ -122,6 +122,7 @@ func (a *Admin) Register(app *fiber.App) {
 	app.Post("/admin/v1/api-keys", a.createKey)
 	app.Get("/admin/v1/api-keys", a.listKeys)
 	app.Get("/admin/v1/upstreams", a.listUpstreams)
+	app.Get("/admin/v1/upstreams/deletion-backlog", a.upstreamDeletionBacklog)
 	app.Post("/admin/v1/upstreams", a.createUpstream)
 	app.Put("/admin/v1/upstreams/:id", a.updateUpstream)
 	app.Delete("/admin/v1/upstreams/:id", a.deleteUpstream)
@@ -651,6 +652,17 @@ func (a *Admin) listUpstreams(c *fiber.Ctx) error {
 	}
 	c.Set("X-Total-Count", strconv.FormatInt(total, 10))
 	return c.JSON(values)
+}
+
+func (a *Admin) upstreamDeletionBacklog(c *fiber.Ctx) error {
+	if a.Repo == nil {
+		return fiber.ErrServiceUnavailable
+	}
+	backlog, err := a.Repo.GetUpstreamDeletionBacklog(c.UserContext())
+	if err != nil {
+		return a.fail("upstream_deletion_backlog", err)
+	}
+	return c.JSON(backlog)
 }
 
 func (a *Admin) createUpstream(c *fiber.Ctx) error {

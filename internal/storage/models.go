@@ -53,3 +53,21 @@ type UpstreamDeletion struct {
 	Transitioned bool  `json:"transitioned"`
 	RevokedKeys  int64 `json:"revoked_keys"`
 }
+
+// UpstreamDeletionBacklog is the database-backed deletion state used by both
+// the admin status endpoint and the finalizer metrics.
+type UpstreamDeletionBacklog struct {
+	Pending              int64      `json:"pending"`
+	Due                  int64      `json:"due"`
+	Malformed            int64      `json:"malformed"`
+	OldestPurgeAfter     *time.Time `json:"oldest_purge_after,omitempty"`
+	OldestOverdueSeconds float64    `json:"oldest_overdue_seconds"`
+}
+
+// UpstreamFinalizationResult separates work completed by this sweep from the
+// backlog that remains in PostgreSQL after it finished.
+type UpstreamFinalizationResult struct {
+	Finalized   int64                   `json:"finalized"`
+	RevokedKeys int64                   `json:"revoked_keys"`
+	Backlog     UpstreamDeletionBacklog `json:"backlog"`
+}

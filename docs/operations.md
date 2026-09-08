@@ -1,5 +1,20 @@
 # Operations
 
+## Database migrations and upgrades
+
+The gateway and seed command run the single embedded PostgreSQL migration runner before serving or seeding data. Migrations are ordered by their numeric filename (`001_...sql`), normalized to LF, and recorded in `public.schema_migrations` with a SHA-256 checksum. Each migration and its ledger row commit in one transaction. A PostgreSQL advisory lock prevents two gateway or seed processes from applying migrations concurrently.
+
+An already-recorded migration whose name or checksum changes is a startup failure. Do not edit an applied SQL file; add a new numbered migration. The migration runner fails closed when a database contains an unsupported historical schema, including legacy API-key columns, unknown rule sources, nullable audit event IDs, or incomplete lifecycle constraints. Back up PostgreSQL before an upgrade and keep the `gateway-keys` volume with it.
+
+Fresh databases are migrated automatically. Existing volumes must be exercised before deployment with:
+
+```powershell
+$env:POSTGRES_PASSWORD = '<load-from-your-secret-store>'
+./tests/integration/run-migration-rehearsal.ps1
+```
+
+The rehearsal intentionally retains its Compose volume so operators can inspect it. Remove it only after inspection with the command printed by the script. Never put a usable password in source, examples, or shell history.
+
 ## Production bootstrap
 
 Before starting a production gateway, set `POSTGRES_URL` and run:
@@ -18,7 +33,7 @@ Kafka, Redis, and the configured Auditor appear in `/readyz` as degraded but do 
 
 ## Alerts
 
-Load `deploy/prometheus-alerts.yml` into the deployment's Prometheus. Investigate `AuditGatewayNotReady` by reading `/readyz`; repair PostgreSQL first, then ensure the audit queue drains. For `AuditOutboxBacklog`, restore Kafka and watch `audit_outbox_pending` decline. For Redis fallback, treat limits as per-instance until shared Redis recovers.
+Load `deploy/prometheus-alerts.yml` into the deployment's Prometheus. Investigate `AuditGatewayNotReady` by reading `/readyz`; repair PostgreSQL first, then ensure the audit queue drains. For `AuditOutboxBacklog`, restore Kafka and watch `audit_outbox_pending` decline. For upstream cleanup, query `GET /admin/v1/upstreams/deletion-backlog`: `pending` is the current deleting count, `due` is ready for physical cleanup, `malformed` requires data repair, and `oldest_overdue_seconds` measures the oldest due row. `UpstreamDeletionFinalizerFailures` means cleanup made no reliable progress and must be investigated from structured logs. For Redis fallback, treat limits as per-instance until shared Redis recovers.
 
 ## ClickHouse audit consumer
 

@@ -68,7 +68,11 @@ func (m *Metrics) Set(name string, value float64, labels map[string]string) {
 	shard.mu.Unlock()
 }
 func (m *Metrics) Inc(name string, labels map[string]string) {
-	if m == nil {
+	m.Add(name, 1, labels)
+}
+
+func (m *Metrics) Add(name string, value uint64, labels map[string]string) {
+	if m == nil || value == 0 {
 		return
 	}
 	key := labelKey(labels)
@@ -77,7 +81,7 @@ func (m *Metrics) Inc(name string, labels map[string]string) {
 	if shard.counters[name] == nil {
 		shard.counters[name] = map[string]uint64{}
 	}
-	shard.counters[name][key]++
+	shard.counters[name][key] += value
 	shard.mu.Unlock()
 }
 func (m *Metrics) Observe(name string, seconds float64, labels map[string]string) {

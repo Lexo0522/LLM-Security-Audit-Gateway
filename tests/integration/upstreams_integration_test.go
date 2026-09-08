@@ -230,12 +230,18 @@ func TestAdminUpstreamDeletionHTTPContract(t *testing.T) {
 	}
 	second, body := call(http.MethodDelete, "/admin/v1/upstreams/"+upstream.ID)
 	if second.StatusCode != http.StatusAccepted || !strings.Contains(body, `"transitioned":false`) {
-		t.Fatalf("repeated delete status=%d body=%s", second.StatusCode, body)
+		t.Fatalf("second delete status=%d body=%s", second.StatusCode, body)
+	}
+	backlogResponse, backlogBody := call(http.MethodGet, "/admin/v1/upstreams/deletion-backlog")
+	if backlogResponse.StatusCode != http.StatusOK || !strings.Contains(backlogBody, `"pending":1`) {
+		t.Fatalf("backlog status=%d body=%s", backlogResponse.StatusCode, backlogBody)
 	}
 	time.Sleep(10 * time.Millisecond)
-	if finalized, err := repo.FinalizeDueUpstreamDeletions(ctx, 10); err != nil || finalized != 1 {
-		t.Fatalf("finalized=%d err=%v", finalized, err)
+	result, err := repo.FinalizeDueUpstreamDeletionsResult(ctx, 10)
+	if err != nil || result.Finalized != 1 || result.Backlog.Pending != 0 {
+		t.Fatalf("finalization result=%+v err=%v", result, err)
 	}
+
 	missing, _ := call(http.MethodDelete, "/admin/v1/upstreams/"+upstream.ID)
 	if missing.StatusCode != http.StatusNotFound {
 		t.Fatalf("purged delete status=%d", missing.StatusCode)

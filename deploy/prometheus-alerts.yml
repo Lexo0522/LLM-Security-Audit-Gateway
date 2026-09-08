@@ -16,6 +16,31 @@ groups:
         for: 5m
         labels: { severity: warning }
         annotations: { summary: "Audit persistence queue exceeds 80% capacity" }
+      - alert: UpstreamDeletionBacklog
+        expr: upstream_deletion_backlog > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations: { summary: "Upstream deletion backlog is not empty" }
+      - alert: UpstreamDeletionOverdue
+        expr: upstream_deletion_oldest_age_seconds > 3600
+        for: 10m
+        labels: { severity: critical }
+        annotations: { summary: "An upstream deletion has been overdue for more than one hour" }
+      - alert: UpstreamDeletionMalformed
+        expr: upstream_deletion_malformed > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: "Deleting upstream rows are missing valid purge timestamps" }
+      - alert: UpstreamDeletionFinalizerFailures
+        expr: increase(upstream_deletion_finalizer_failures_total[15m]) > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: "The upstream deletion finalizer is failing" }
+      - alert: UpstreamDeletionFinalizerZeroProgress
+        expr: upstream_deletion_finalizer_zero_progress_timestamp > 0 and time() - upstream_deletion_finalizer_zero_progress_timestamp > 900
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: "Due upstream deletions are making no finalizer progress" }
       - alert: AuditOutboxBacklog
         expr: audit_outbox_pending > 1000
         for: 10m

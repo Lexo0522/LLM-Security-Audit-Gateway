@@ -2,7 +2,7 @@
 
 ## Metrics and integration tests
 
-`GET /metrics` exposes Prometheus-format, low-cardinality gateway metrics: request latency/counts, rule decisions, rate-limit rejections, Auditor outcomes/circuit openings, audit queue drops, PostgreSQL batch results, Kafka publish results, Redis limiter/cache results, consumer lag, outbox backlog/age, and retention deletions. Tenant IDs, request IDs, rule IDs, request bodies, tokens, and content hashes are never metric labels.
+`GET /metrics` exposes Prometheus-format, low-cardinality gateway metrics: request latency/counts, rule decisions, rate-limit rejections, Auditor outcomes/circuit openings, audit queue drops, PostgreSQL batch results, Kafka publish results, Redis limiter/cache results, consumer lag, outbox backlog/age, retention deletions, and upstream deletion backlog/due/oldest-age/finalizer metrics. Tenant IDs, request IDs, rule IDs, upstream IDs, request bodies, tokens, and content hashes are never metric labels. `GET /admin/v1/upstreams/deletion-backlog` reports the database-backed pending, due, malformed, and oldest deletion state.
 
 Run the real PostgreSQL/Redis/Kafka smoke test with Docker Desktop available:
 
