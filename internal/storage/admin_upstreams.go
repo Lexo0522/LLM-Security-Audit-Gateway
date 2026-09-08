@@ -23,15 +23,6 @@ var (
 	ErrUpstreamNotFound       = fmt.Errorf("%w: upstream not found", pgx.ErrNoRows)
 )
 
-type AdminRepository interface {
-	CountAdminUsers(context.Context) (int64, error)
-	CreateAdminUser(context.Context, string, []byte) (AdminUser, error)
-	GetAdminUser(context.Context, string) (AdminUser, []byte, error)
-	CreateAdminSession(context.Context, string, []byte, time.Time) (AdminSession, error)
-	GetAdminSession(context.Context, []byte) (AdminSession, AdminUser, error)
-	RevokeAdminSession(context.Context, []byte) error
-}
-
 func (r *Repository) CountAdminUsers(ctx context.Context) (int64, error) {
 	if r == nil || r.pool == nil {
 		return 0, fmt.Errorf("postgres disabled")
@@ -334,13 +325,6 @@ func (r *Repository) GetUpstreamDeletionBacklog(ctx context.Context) (UpstreamDe
 		}
 	}
 	return backlog, nil
-}
-
-// FinalizeDueUpstreamDeletions physically removes due deleting upstreams and
-// their revoked gateway keys. Each upstream is processed in its own transaction.
-func (r *Repository) FinalizeDueUpstreamDeletions(ctx context.Context, limit int) (int64, error) {
-	result, err := r.FinalizeDueUpstreamDeletionsResult(ctx, limit)
-	return result.Finalized, err
 }
 
 // FinalizeDueUpstreamDeletionsResult reports committed work and the remaining
