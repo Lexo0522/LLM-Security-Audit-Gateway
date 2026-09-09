@@ -417,8 +417,12 @@ func runUpstreamDeletionFinalizer(ctx context.Context, cfg config.Config, repo *
 				}
 				finalized += float64(result.Finalized)
 				metrics.Set("upstream_deletion_rows_finalized", finalized, nil)
-				metrics.Add("upstream_deletion_finalized_total", uint64(result.Finalized), nil)
-				metrics.Add("upstream_deletion_keys_revoked_total", uint64(result.RevokedKeys), nil)
+				if result.Finalized > 0 {
+					metrics.Add("upstream_deletion_finalized_total", uint64(result.Finalized), nil)
+				}
+				if result.RevokedKeys > 0 {
+					metrics.Add("upstream_deletion_keys_revoked_total", uint64(result.RevokedKeys), nil)
+				}
 				metrics.Inc("upstream_deletion_finalizer_total", map[string]string{"result": "success"})
 				if result.Finalized > 0 {
 					logger.Info("upstream deletions finalized", slog.Int64("upstreams", result.Finalized), slog.Int64("revoked_keys", result.RevokedKeys), slog.Int64("backlog", result.Backlog.Pending))
